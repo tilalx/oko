@@ -1,0 +1,19 @@
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+data/*.sqlite3
+data/models
+# The `serve` stage no longer bakes output/forecast_de.json into the
+# image -- it reads it live from a mounted volume at runtime instead (see
+# docker-compose.yml / Jenkinsfile), so the build context doesn't need it.
+output/
+.env
+.env.*

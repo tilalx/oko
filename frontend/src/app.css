@@ -1,0 +1,94 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+/* OKO's dark map/dashboard palette (ported from the previous static
+   index.html) mapped onto shadcn-svelte's standard token names, so
+   shadcn-svelte primitives (Button, Popover, Select, Slider, Tabs, ...)
+   render in this theme instead of shadcn's own defaults. This app is
+   dark-only -- there is no light variant to swap in. */
+:root {
+  --background: #08090a;
+  --foreground: #eef1ec;
+  --card: #1a1c19;
+  --card-foreground: #eef1ec;
+  --popover: #1a1c19;
+  --popover-foreground: #eef1ec;
+  --primary: #eef1ec;
+  --primary-foreground: #14150f;
+  --secondary: rgba(255, 255, 255, 0.05);
+  --secondary-foreground: #eef1ec;
+  --muted: rgba(255, 255, 255, 0.05);
+  --muted-foreground: #8b968c;
+  --accent-color: #46c491;
+  --accent: rgba(255, 255, 255, 0.07);
+  --accent-foreground: #eef1ec;
+  --destructive: #e0704f;
+  --border: rgba(255, 255, 255, 0.09);
+  --input: rgba(255, 255, 255, 0.09);
+  --ring: #46c491;
+  --radius: 0.6rem;
+
+  /* OKO-specific, not part of shadcn's token set. */
+  --sidebar-bg: #060706;
+  --card-translucent: rgba(24, 26, 22, 0.94);
+  --high: #46c491;
+  --medium: #e0b74f;
+  --low: #e0704f;
+  --pill-active-bg: #eef1ec;
+  --pill-active-fg: #14150f;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family:
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  overflow: hidden;
+  color-scheme: dark;
+}
+a {
+  color: inherit;
+}
+button {
+  font-family: inherit;
+}

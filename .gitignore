@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs / package managers
+.venv/
+venv/
+uv.lock.bak
+
+# Test / coverage / type-checking
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Data (local history DB, trained models, exports)
+data/*.sqlite3
+data/*.sqlite3-*
+data/models/
+output/
+
+# Env / secrets
+.env
+.env.*
+*.token
+webapi.token
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# gh-pages export artifact (only ever lives on the gh-pages branch)
+de.json
+
+# Frontend build output -- `cd frontend && npm run build` writes straight
+# into oko/api/app.py's StaticFiles mount (see frontend/vite.config.ts).
+# zones.geojson lives in the same directory but is a committed data file,
+# not a build artifact -- not covered by these patterns.
+frontend/node_modules/
+frontend/dist/
+src/oko/api/static/index.html
+src/oko/api/static/assets/

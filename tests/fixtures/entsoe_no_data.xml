@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Acknowledgement_MarketDocument xmlns="urn:iec62325.351:tc57wg16:551-3:acknowledgementdocument:4:0">
+  <mRID>test-ack-doc-1</mRID>
+  <createdDateTime>2026-08-31T00:00:00Z</createdDateTime>
+  <Reason>
+    <code>999</code>
+    <text>No matching data found for Data item Actual Generation Per Type Domain</text>
+  </Reason>
+</Acknowledgement_MarketDocument>
