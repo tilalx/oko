@@ -41,8 +41,6 @@ pipeline {
     environment {
         ENTSOE_TOKEN = credentials('oko-entsoe-token')
         IMAGE_TAG = "oko:${env.BUILD_NUMBER}"
-        // Push access to the separate oko-dataset repo.
-        OKO_DATASET_SSH_KEY = credentials('oko-dataset-deploy-key')
     }
 
     stages {
@@ -104,7 +102,6 @@ pipeline {
                 sh '''
                     mkdir -p logs
                     ( set -e
-                      export GIT_SSH_COMMAND="ssh -i $OKO_DATASET_SSH_KEY -o StrictHostKeyChecking=accept-new"
                       git clone --depth 1 git@github.com:tilalx/oko-dataset.git oko-dataset
 
                       docker run --rm \
@@ -168,10 +165,9 @@ pipeline {
 
     post {
         failure {
-            echo 'Pipeline fehlgeschlagen — ggf. Home-Assistant-Webhook fuer Alert nachruesten.'
+            echo 'Pipeline fehlgeschlagen. Siehe obige Logs für Details.'
         }
         always {
-            sh 'docker system prune -f --filter "until=24h" || true'
             cleanWs()
         }
     }
