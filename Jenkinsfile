@@ -121,7 +121,8 @@ pipeline {
                       git -c user.name=oko-bot -c user.email=oko-bot@users.noreply.github.com \
                           commit -m "data: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
                       git push origin main
-                    ; echo $? > ../logs/publish-dataset.status ) 2>&1 | tee logs/publish-dataset.log
+                    ) 2>&1 | tee logs/publish-dataset.log
+                    echo $? > logs/publish-dataset.status
                     status=$(cat logs/publish-dataset.status)
                     if [ "$status" -ne 0 ]; then exit "$status"; fi
                 '''
