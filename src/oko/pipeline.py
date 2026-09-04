@@ -45,10 +45,14 @@ MIN_TRAINING_ROWS = 24 * 14
 
 
 class PipelineError(RuntimeError):
+    """Pipeline execution failed."""
+
     pass
 
 
 class InsufficientHistoryError(PipelineError):
+    """Insufficient training history to forecast."""
+
     pass
 
 
@@ -159,6 +163,8 @@ def _current_breakdown(
 
 @dataclass(frozen=True, slots=True)
 class PipelineResult:
+    """Results from one pipeline run across all zones."""
+
     zones: dict[str, dict[str, object]]
     exchanges: dict[str, object] | None
 
@@ -171,6 +177,7 @@ def upsert_zone_history(
     traced: list[CarbonIntensity],
     settings: Settings,
 ) -> int:
+    """Upsert calculated intensities to history database."""
     intensity_by_hour = {entry.timestamp: entry for entry in traced}
     if not (production_by_hour and load_by_hour):
         logger.warning(
@@ -298,6 +305,8 @@ async def _run_zone(
 
 @dataclass(frozen=True, slots=True)
 class WindowData:
+    """Production and exchange data for one time window."""
+
     production: dict[str, dict[dt.datetime, dict[str, float]]]
     exchanges: list[entsoe.ExchangeRecord]
     load_by_zone: dict[str, dict[dt.datetime, float]]
@@ -312,6 +321,7 @@ async def fetch_and_trace_window(
     client: httpx.AsyncClient,
     settings: Settings,
 ) -> WindowData:
+    """Fetch and trace flows for production and exchanges."""
     production, exchanges, load_by_zone = await asyncio.gather(
         _fetch_production_for_zones(
             FLOW_TRACING_ZONES, start, end, client=client, settings=settings
@@ -337,6 +347,7 @@ async def fetch_and_trace_window(
 
 
 async def run_pipeline(*, settings: Settings | None = None) -> PipelineResult:
+    """Run hourly forecast pipeline for all zones."""
     resolved_settings = settings or get_settings()
     now = dt.datetime.now(dt.UTC).replace(minute=0, second=0, microsecond=0)
     fetch_start = now - dt.timedelta(hours=HISTORY_FETCH_WINDOW_HOURS)
@@ -417,6 +428,7 @@ async def run_pipeline(*, settings: Settings | None = None) -> PipelineResult:
 
 
 def main() -> None:
+    """Entry point: run pipeline and export forecast JSON."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--export", required=True, help="Path to write DE-LU's forecast JSON to.")
     args = parser.parse_args()

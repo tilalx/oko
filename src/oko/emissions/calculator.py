@@ -15,6 +15,8 @@ logger = structlog.get_logger(__name__)
 
 
 class CalculatorError(RuntimeError):
+    """Carbon intensity calculation failed."""
+
     pass
 
 
@@ -24,6 +26,8 @@ FOSSIL_FREE_CATEGORIES = RENEWABLE_CATEGORIES | {"nuclear"}
 
 @dataclass(frozen=True, slots=True)
 class CarbonIntensity:
+    """Carbon intensity with import correction and breakdown."""
+
     zone: str
     timestamp: dt.datetime
     domestic_g_per_kwh: float | None
@@ -36,6 +40,7 @@ class CarbonIntensity:
 def power_breakdown_percentages(
     production_by_category: Mapping[str, float],
 ) -> tuple[dict[str, float], float, float]:
+    """Compute power mix breakdown, renewable %, and fossil-free %."""
     total_mw = sum(mw for mw in production_by_category.values() if mw > 0)
     if total_mw <= 0:
         return {}, 0.0, 0.0
@@ -58,6 +63,7 @@ def power_breakdown_percentages(
 def emissions_weighted_breakdown_percentages(
     production_by_category: Mapping[str, float], factors: Mapping[str, float]
 ) -> dict[str, float]:
+    """Breakdown percentages weighted by emission factors."""
     unknown_factor = factors["unknown"]
     weighted = {
         category: mw * factors.get(category, unknown_factor)
@@ -73,6 +79,7 @@ def emissions_weighted_breakdown_percentages(
 def production_intensity(
     production_by_category: Mapping[str, float], factors: Mapping[str, float]
 ) -> float | None:
+    """Emission intensity of production mix (g CO2eq/kWh)."""
     total_mw = sum(mw for mw in production_by_category.values() if mw > 0)
     if total_mw <= 0:
         return None
@@ -86,6 +93,7 @@ def production_intensity(
 
 
 def import_mw_into(zone: str, record: ExchangeRecord) -> float:
+    """Import power into zone from exchange record (MW)."""
     if record.zone_to == zone:
         return max(record.net_flow_mw, 0.0)
     if record.zone_from == zone:
@@ -110,6 +118,7 @@ def calculate(
     neighbor_imports_mw: Mapping[str, float],
     neighbor_domestic_intensities: Mapping[str, float],
 ) -> CarbonIntensity:
+    """Compute carbon intensity with one-hop import correction."""
     domestic = production_intensity(production_by_category, factors)
     domestic_mw = sum(mw for mw in production_by_category.values() if mw > 0)
 
@@ -154,6 +163,7 @@ def calculate_series(
     exchange_records: Sequence[ExchangeRecord],
     factors_for_zone: Mapping[str, Mapping[str, float]],
 ) -> list[CarbonIntensity]:
+    """Compute carbon intensity over a time series with one-hop fallback."""
     exchanges_by_hour: dict[dt.datetime, list[ExchangeRecord]] = {}
     for record in exchange_records:
         if target_zone in (record.zone_from, record.zone_to):

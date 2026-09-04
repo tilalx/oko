@@ -24,6 +24,8 @@ ATTRIBUTION: tuple[str, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class CurrentBreakdown:
+    """Current power mix breakdown and emissions."""
+
     timestamp: dt.datetime
     power_breakdown_percent: dict[str, float]
     renewable_percent: float
@@ -45,6 +47,7 @@ def build_payload(
     training_rows: int,
     current: CurrentBreakdown | None = None,
 ) -> dict[str, Any]:
+    """Build forecast JSON payload."""
     return {
         "zone": _export_zone_name(zone),
         "generated_at": format_iso_z(generated_at),
@@ -87,6 +90,7 @@ def build_exchanges_payload(
     generated_at: dt.datetime,
     source_repo_url: str,
 ) -> dict[str, Any]:
+    """Build cross-border exchange JSON payload."""
     latest_by_border: dict[tuple[str, str], ExchangeRecord] = {}
     for record in records:
         border = (record.zone_from, record.zone_to)
@@ -109,6 +113,7 @@ def build_exchanges_payload(
 
 
 def write_json(payload: dict[str, Any], path: Path) -> None:
+    """Write JSON payload atomically to file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:

@@ -183,6 +183,7 @@ def trace_flows_for_hour(
     factors_for_zone: Mapping[str, Mapping[str, float]],
     lifecycle_factors_for_zone: Mapping[str, Mapping[str, float]] | None = None,
 ) -> dict[str, CarbonIntensity]:
+    """Trace cross-border flows for one hour across the network."""
     hour_records = [r for r in records if r.timestamp == timestamp]
     generation, emissions, lifecycle_emissions, inflow = _prune_to_positive_inflow(
         set(production_by_zone_hour),
@@ -273,6 +274,7 @@ def trace_flows_series(
     factors_for_zone: Mapping[str, Mapping[str, float]],
     lifecycle_factors_for_zone: Mapping[str, Mapping[str, float]] | None = None,
 ) -> dict[str, list[CarbonIntensity]]:
+    """Trace flows for a time series (multiple hours) across network."""
     hours = sorted({hour for zone_hours in production_by_zone.values() for hour in zone_hours})
     by_zone: dict[str, list[CarbonIntensity]] = {}
     for hour in hours:

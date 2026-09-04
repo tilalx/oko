@@ -164,7 +164,9 @@ def test_built_frontend_js_bundle_served() -> None:
     from oko.api.app import STATIC_DIR
 
     bundles = list((STATIC_DIR / "assets").glob("*.js"))
-    assert bundles, "expected a built JS bundle under static/assets/ -- run `cd frontend && npm run build`"
+    assert bundles, (
+        "expected a built JS bundle under static/assets/ -- run `cd frontend && npm run build`"
+    )
     response = TestClient(app).get(f"/assets/{bundles[0].name}")
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]

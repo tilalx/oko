@@ -98,9 +98,7 @@ def generate_predictions(
             for category, pct in MOCK_POWER_BREAKDOWN_PERCENT.items()
         }
         breakdown_total = sum(breakdown.values()) or 1.0
-        breakdown = {
-            category: 100.0 * pct / breakdown_total for category, pct in breakdown.items()
-        }
+        breakdown = {category: 100.0 * pct / breakdown_total for category, pct in breakdown.items()}
         predictions.append(
             Prediction(
                 timestamp=timestamp,

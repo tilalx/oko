@@ -135,7 +135,9 @@ def test_chunk_windows_splits_into_chunk_sized_pieces_covering_the_whole_span() 
     assert windows[0] == (start, start + dt.timedelta(hours=_CHUNK_HOURS))
     assert windows[-1][1] == end
     # Contiguous, no gaps or overlaps.
-    for (_, prev_end), (next_start, _) in zip(windows, windows[1:], strict=False):
+    import itertools
+
+    for (_, prev_end), (next_start, _) in itertools.pairwise(windows):
         assert prev_end == next_start
     assert sum((w[1] - w[0] for w in windows), dt.timedelta()) == end - start
 

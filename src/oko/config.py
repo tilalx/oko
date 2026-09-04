@@ -286,6 +286,7 @@ ZONE_BBOXES: dict[str, dict[str, float]] = {
 
 
 class Settings(BaseSettings):
+    """Application settings from environment variables."""
 
     model_config = SettingsConfigDict(
         env_prefix="",
@@ -316,8 +317,10 @@ class Settings(BaseSettings):
 
     @property
     def source_repo_url(self) -> str:
+        """OKO repository URL."""
         return "https://github.com/tilalx/oko"
 
 
 def get_settings() -> Settings:
+    """Load application settings from environment."""
     return Settings()

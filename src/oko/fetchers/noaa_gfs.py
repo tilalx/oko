@@ -156,9 +156,7 @@ def _parse_idx(text: str) -> list[_IdxEntry]:
     return entries
 
 
-def _byte_range(
-    entries: list[_IdxEntry], *, varname: str, level: str
-) -> tuple[int, int | None]:
+def _byte_range(entries: list[_IdxEntry], *, varname: str, level: str) -> tuple[int, int | None]:
     """Find one field's byte range in an already-parsed idx.
 
     Matching is exact-equality on ``(varname, level)`` -- level strings
@@ -270,14 +268,14 @@ async def _fetch_hour_grids(
     valid_time = cycle + dt.timedelta(hours=forecast_hour)
     for attempt in range(1, max_retries + 1):
         try:
-            idx_response = await client.get(
-                f"{url}.idx", timeout=timeout, headers=REQUEST_HEADERS
-            )
+            idx_response = await client.get(f"{url}.idx", timeout=timeout, headers=REQUEST_HEADERS)
             idx_response.raise_for_status()
-            entries = _parse_idx(idx_response.text)
+            entries_snapshot = _parse_idx(idx_response.text)
 
-            async def _fetch_field(varname: str, level: str) -> bytes:
-                start, end = _byte_range(entries, varname=varname, level=level)
+            async def _fetch_field(
+                field_var: str, field_level: str, entries: list[_IdxEntry] = entries_snapshot
+            ) -> bytes:
+                start, end = _byte_range(entries, varname=field_var, level=field_level)
                 response = await client.get(
                     url,
                     timeout=timeout,
@@ -285,7 +283,7 @@ async def _fetch_hour_grids(
                 )
                 response.raise_for_status()
                 if not response.content:
-                    raise NoaaGfsError(f"empty response body for {varname}:{level}")
+                    raise NoaaGfsError(f"empty response body for {field_var}:{field_level}")
                 return response.content
 
             u_bytes, v_bytes, dswrf_bytes = await asyncio.gather(
@@ -388,9 +386,7 @@ async def fetch_global_forecast(
     return hours
 
 
-def extract_zone_series(
-    hours: list[_GlobalHour], bbox: Mapping[str, float]
-) -> list[WeatherPoint]:
+def extract_zone_series(hours: list[_GlobalHour], bbox: Mapping[str, float]) -> list[WeatherPoint]:
     """Slice one zone's ``WeatherPoint`` series from already-fetched global hours.
 
     Pure/local -- no network access, just a bbox-restricted spatial mean

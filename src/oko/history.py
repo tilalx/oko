@@ -42,6 +42,8 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
 
 @dataclass(frozen=True, slots=True)
 class HistoryRow:
+    """One historical observation with features and targets."""
+
     zone: str
     features: FeatureRow
     target_g_per_kwh: float
@@ -51,6 +53,7 @@ class HistoryRow:
 
 
 def init_db(path: Path) -> None:
+    """Initialize database schema and apply migrations."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
         conn.execute(_SCHEMA)
@@ -60,6 +63,7 @@ def init_db(path: Path) -> None:
 
 
 def upsert_rows(path: Path, rows: Sequence[HistoryRow]) -> None:
+    """Insert or update historical observations in database."""
     if not rows:
         return
     init_db(path)
@@ -136,6 +140,7 @@ def _feature_row_from_columns(
 def load_training_rows(
     path: Path, zone: str, *, target: Literal["direct", "lifecycle"] = "direct"
 ) -> tuple[list[FeatureRow], list[float]]:
+    """Load historical features and intensity targets for training."""
     if not path.exists():
         return [], []
     init_db(path)  # tolerate a DB file whose schema predates a later migration column
@@ -185,6 +190,7 @@ def load_training_rows(
 def load_breakdown_training_rows(
     path: Path, zone: str
 ) -> tuple[list[FeatureRow], list[dict[str, float]]]:
+    """Load historical features and power mix breakdowns for training."""
     if not path.exists():
         return [], []
     init_db(path)  # tolerate a DB file whose schema predates a later migration column
@@ -232,6 +238,8 @@ def load_breakdown_training_rows(
 
 @dataclass(frozen=True, slots=True)
 class HistoryPoint:
+    """One historical observation with intensity and breakdown."""
+
     timestamp: dt.datetime
     value_g_per_kwh: float
     value_lifecycle_g_per_kwh: float | None
@@ -243,6 +251,7 @@ MAX_HISTORY_QUERY_HOURS = 24 * 30
 
 
 def query_recent(path: Path, zone: str, since: dt.datetime) -> list[HistoryPoint]:
+    """Query historical observations since a given time."""
     if not path.exists():
         return []
     init_db(path)  # tolerate a DB file whose schema predates a later migration column

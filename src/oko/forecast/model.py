@@ -34,6 +34,7 @@ DEFAULT_NUM_BOOST_ROUND = 200
 
 
 def confidence_for_horizon(horizon_hours: int) -> Confidence:
+    """Confidence level based on forecast horizon."""
     if horizon_hours <= CONFIDENCE_HIGH_MAX_HOURS:
         return "high"
     if horizon_hours <= CONFIDENCE_MEDIUM_MAX_HOURS:
@@ -43,6 +44,8 @@ def confidence_for_horizon(horizon_hours: int) -> Confidence:
 
 @dataclass(frozen=True, slots=True)
 class Prediction:
+    """One forecast hour's predicted carbon intensity."""
+
     timestamp: dt.datetime
     value_g_per_kwh: float
     confidence: Confidence
@@ -55,6 +58,7 @@ def _to_matrix(rows: list[FeatureRow]) -> np.ndarray:
 
 
 class CarbonIntensityModel:
+    """LightGBM model for carbon intensity forecasting."""
 
     def __init__(self, booster: lgb.Booster) -> None:
         """Wrap an already-trained LightGBM booster; prefer ``train``/``load``."""
@@ -198,7 +202,8 @@ class BreakdownModel:
                 there's nothing to train on.
         """
         if len(rows) != len(breakdowns):
-            raise ValueError(f"rows ({len(rows)}) and breakdowns ({len(breakdowns)}) length mismatch")
+            msg = f"rows ({len(rows)}) and breakdowns ({len(breakdowns)}) length mismatch"
+            raise ValueError(msg)
         if not rows:
             raise ValueError("Cannot train on an empty dataset")
 

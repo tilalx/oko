@@ -223,7 +223,10 @@ def test_save_load_roundtrip_produces_identical_predictions(tmp_path: Path) -> N
 def _synthetic_breakdowns(n: int) -> tuple[list[features.FeatureRow], list[dict[str, float]]]:
     rows, _ = _synthetic_rows(n)
     breakdowns = [
-        {"wind": 20.0 + row.residual_load_share * 10.0, "coal": 80.0 - row.residual_load_share * 10.0}
+        {
+            "wind": 20.0 + row.residual_load_share * 10.0,
+            "coal": 80.0 - row.residual_load_share * 10.0,
+        }
         for row in rows
     ]
     return rows, breakdowns
