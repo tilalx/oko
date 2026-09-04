@@ -28,3 +28,27 @@ repos:
         args: [--maxkb=1024]
       - id: check-merge-conflict
       - id: detect-private-key
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # General
+      - id: check-json
+      - id: check-yaml
+      - id: check-toml
+      - id: check-xml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+      # Prevent accidental secrets/private keys
+      - id: detect-private-key
+
+      # Validate JSON formatting
+      - id: pretty-format-json
+        exclude: (^|/)(package\.json|package-lock\.json)$
+        args:
+          - --autofix
+          - --indent
+          - "2"

@@ -34,12 +34,17 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '50'))
     }
 
+    parameters {
+        booleanParam(name: 'GENERATE_DATASET', defaultValue: false, description: 'Generate and publish forecast dataset')
+    }
+
     triggers {
         cron('H * * * *')
     }
 
     environment {
         ENTSOE_TOKEN = credentials('oko-entsoe-token')
+        GITHUB_CREDENTIALS = credentials('github-tilalx')
         IMAGE_TAG = "oko:${env.BUILD_NUMBER}"
     }
 
@@ -92,7 +97,10 @@ pipeline {
             when {
                 allOf {
                     branch 'main'
-                    triggeredBy 'TimerTrigger'
+                    anyOf {
+                        triggeredBy 'TimerTrigger'
+                        expression { params.GENERATE_DATASET == true }
+                    }
                 }
             }
             options { timeout(time: 10, unit: 'MINUTES') }
@@ -101,13 +109,19 @@ pipeline {
                 sh "docker build --target runtime -t ${IMAGE_TAG} ."
                 sh '''
                     mkdir -p logs
+                    set -o pipefail
                     ( set -e
-                      git clone --depth 1 git@github.com:tilalx/oko-dataset.git oko-dataset
+                      git config --global credential.helper store
+                      echo "https://${GITHUB_CREDENTIALS}@github.com" > ~/.git-credentials
+                      chmod 600 ~/.git-credentials
+
+                      git clone --depth 1 https://github.com/tilalx/oko-dataset.git oko-dataset
+                      chmod 777 oko-dataset
 
                       docker run --rm \
                         -e ENTSOE_TOKEN=$ENTSOE_TOKEN \
                         -e SQLITE_PATH=/output/oko.sqlite3 \
-                        -v "$WORKSPACE/oko-dataset:/output:z,U" \
+                        -v "$WORKSPACE/oko-dataset:/output:z" \
                         -v oko-history-data:/app/data \
                         $IMAGE_TAG \
                         oko.pipeline --export /output/forecast_de.json
@@ -118,13 +132,10 @@ pipeline {
                           echo "No forecast produced this run -- nothing to publish."
                           exit 0
                       fi
-                      git -c user.name=oko-bot -c user.email=oko-bot@users.noreply.github.com \
+                      git -c user.name=tilalx -c user.email=tilalx@users.noreply.github.com \
                           commit -m "data: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
                       git push origin main
                     ) 2>&1 | tee logs/publish-dataset.log
-                    echo $? > logs/publish-dataset.status
-                    status=$(cat logs/publish-dataset.status)
-                    if [ "$status" -ne 0 ]; then exit "$status"; fi
                 '''
             }
             post {
