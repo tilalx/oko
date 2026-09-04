@@ -48,6 +48,7 @@ RUN uv run ruff check . && uv run ruff format --check . && uv run mypy src
 # ---- test: pytest with coverage --------------------------------------------
 FROM builder AS test
 COPY tests ./tests
+COPY --from=frontend-builder /fe/dist ./src/oko/api/static
 RUN uv run pytest
 
 # ---- runtime: minimal, non-root, no dev/test deps --------------------------
