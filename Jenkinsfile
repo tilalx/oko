@@ -117,6 +117,8 @@ pipeline {
 
                       git clone --depth 1 https://github.com/tilalx/oko-dataset.git oko-dataset
                       chmod 777 oko-dataset
+                      touch oko-dataset/oko.sqlite3
+                      chmod 666 oko-dataset/oko.sqlite3
 
                       docker run --rm \
                         -e ENTSOE_TOKEN=$ENTSOE_TOKEN \
