@@ -15,7 +15,7 @@ dependencies = [
     "pandas>=3.0.5",
     "lightgbm>=4.7.0",
     "scikit-learn>=1.5",
-    "xmltodict>=0.13",
+    "xmltodict>=1.0.4",
     "eccodes>=2.48",
     "eccodeslib>=2.48",
 ]
