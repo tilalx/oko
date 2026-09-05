@@ -165,7 +165,12 @@ def test_backfill_fetches_each_chunk_window_separately(
     ) -> WindowData:
         calls.append((start, end))
         return WindowData(
-            production={}, exchanges=[], load_by_zone={}, traced_series={}, direct_factor_tables={}
+            production={},
+            exchanges=[],
+            load_by_zone={},
+            traced_series={},
+            direct_factor_tables={},
+            price_by_zone={},
         )
 
     monkeypatch.setattr(backfill_module, "fetch_and_trace_window", fake_fetch_and_trace_window)

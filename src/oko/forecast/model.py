@@ -13,7 +13,7 @@ import numpy as np
 import structlog
 
 from oko.emissions.factors import CATEGORIES
-from oko.forecast.features import FEATURE_COLUMNS, FeatureRow
+from oko.forecast.features import FEATURE_COLUMNS, PRICE_FEATURE_COLUMNS, FeatureRow
 
 logger = structlog.get_logger(__name__)
 
@@ -51,10 +51,11 @@ class Prediction:
     confidence: Confidence
     value_lifecycle_g_per_kwh: float | None = None
     power_breakdown_percent: dict[str, float] | None = None
+    price_eur_per_mwh: float | None = None
 
 
-def _to_matrix(rows: list[FeatureRow]) -> np.ndarray:
-    return np.array([[row.as_dict()[col] for col in FEATURE_COLUMNS] for row in rows], dtype=float)
+def _to_matrix(rows: list[FeatureRow], columns: Sequence[str] = FEATURE_COLUMNS) -> np.ndarray:
+    return np.array([[row.as_dict()[col] for col in columns] for row in rows], dtype=float)
 
 
 class CarbonIntensityModel:
@@ -131,6 +132,104 @@ class CarbonIntensityModel:
 
     @classmethod
     def load(cls, path: Path) -> CarbonIntensityModel:
+        """Load a previously saved booster from ``path``."""
+        booster = lgb.Booster(model_file=str(path))
+        return cls(booster)
+
+
+@dataclass(frozen=True, slots=True)
+class PricePrediction:
+    """One forecast hour's predicted day-ahead price."""
+
+    timestamp: dt.datetime
+    price_eur_per_mwh: float
+    confidence: Confidence
+
+
+class PriceModel:
+    """LightGBM model for day-ahead price forecasting.
+
+    Same "perfect prognosis" shape as ``CarbonIntensityModel`` (see
+    ``oko.forecast.features``), extended with one price-specific
+    autocorrelation feature (``price_lag_168h`` -- see
+    ``PRICE_FEATURE_COLUMNS``/``with_price_lag``). Predictions are *not*
+    clamped to 0, since day-ahead prices can legitimately go negative.
+    """
+
+    def __init__(self, booster: lgb.Booster) -> None:
+        """Wrap an already-trained LightGBM booster; prefer ``train``/``load``."""
+        self._booster = booster
+
+    @classmethod
+    def train(
+        cls,
+        rows: list[FeatureRow],
+        targets: list[float],
+        *,
+        params: dict[str, object] | None = None,
+        num_boost_round: int = DEFAULT_NUM_BOOST_ROUND,
+    ) -> PriceModel:
+        """Train a new model on historical feature rows and their observed price.
+
+        Args:
+            rows: training feature rows (``horizon_hours`` should be 0 for
+                all of them — see ``build_training_features``).
+            targets: observed day-ahead price, EUR/MWh, one per row, same
+                order as ``rows``.
+            params: LightGBM parameters; defaults to ``DEFAULT_LGB_PARAMS``.
+            num_boost_round: boosting rounds.
+
+        Returns:
+            A fitted ``PriceModel``.
+
+        Raises:
+            ValueError: if ``rows`` and ``targets`` don't line up, or
+                there's nothing to train on.
+        """
+        if len(rows) != len(targets):
+            raise ValueError(f"rows ({len(rows)}) and targets ({len(targets)}) length mismatch")
+        if not rows:
+            raise ValueError("Cannot train on an empty dataset")
+
+        dataset = lgb.Dataset(
+            _to_matrix(rows, PRICE_FEATURE_COLUMNS), label=np.array(targets, dtype=float)
+        )
+        booster = lgb.train(params or DEFAULT_LGB_PARAMS, dataset, num_boost_round=num_boost_round)
+        logger.info("price_model.trained", rows=len(rows), num_boost_round=num_boost_round)
+        return cls(booster)
+
+    def predict(self, rows: list[FeatureRow]) -> list[PricePrediction]:
+        """Predict day-ahead price for a set of feature rows.
+
+        Args:
+            rows: feature rows to predict for (typically from
+                ``build_forecast_features``).
+
+        Returns:
+            One ``PricePrediction`` per input row, same order. Unlike
+            ``CarbonIntensityModel.predict``, negative values are kept
+            as-is (negative day-ahead prices are a real market outcome).
+        """
+        if not rows:
+            return []
+        raw = self._booster.predict(_to_matrix(rows, PRICE_FEATURE_COLUMNS))
+        return [
+            PricePrediction(
+                timestamp=row.timestamp,
+                price_eur_per_mwh=float(value),
+                confidence=confidence_for_horizon(row.horizon_hours),
+            )
+            for row, value in zip(rows, raw, strict=True)
+        ]
+
+    def save(self, path: Path) -> None:
+        """Save the trained booster to ``path`` (LightGBM's native text format)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._booster.save_model(str(path))
+        logger.info("price_model.saved", path=str(path))
+
+    @classmethod
+    def load(cls, path: Path) -> PriceModel:
         """Load a previously saved booster from ``path``."""
         booster = lgb.Booster(model_file=str(path))
         return cls(booster)

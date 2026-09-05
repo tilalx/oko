@@ -21,13 +21,16 @@
   --secondary-foreground: #eef1ec;
   --muted: rgba(255, 255, 255, 0.05);
   --muted-foreground: #8b968c;
-  --accent-color: #46c491;
+  /* Teal-cyan, not the generic "success green" this used to be --
+     reads as an electrical/voltage-indicator accent instead. The one
+     structural accent: selection, focus, active controls, links. */
+  --accent-color: #35c7c0;
   --accent: rgba(255, 255, 255, 0.07);
   --accent-foreground: #eef1ec;
   --destructive: #e0704f;
   --border: rgba(255, 255, 255, 0.09);
   --input: rgba(255, 255, 255, 0.09);
-  --ring: #46c491;
+  --ring: #35c7c0;
   --radius: 0.6rem;
 
   /* OKO-specific, not part of shadcn's token set. */
@@ -38,6 +41,16 @@
   --low: #e0704f;
   --pill-active-bg: #eef1ec;
   --pill-active-fg: #14150f;
+  /* Copper -- current flowing. Reserved for "this is live right now"
+     (the TopBadge pulse, the timeline's now-marker), kept distinct from
+     --accent-color so "selected" and "live" read as two different
+     signals instead of one accent doing both jobs. */
+  --accent-live: #e8a33d;
+  --accent-live-rgb: 232, 163, 61;
+
+  --font-sans:
+    'IBM Plex Sans', -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
 }
 
 @theme inline {
@@ -63,6 +76,10 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  /* Wires Tailwind's own font-sans/font-mono utilities to Plex too --
+     without this only the explicit `.oko-num` class below picked it up. */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
 }
 
 * {
@@ -76,13 +93,7 @@ body {
   margin: 0;
   background: var(--background);
   color: var(--foreground);
-  font-family:
-    -apple-system,
-    'Segoe UI',
-    Roboto,
-    Helvetica,
-    Arial,
-    sans-serif;
+  font-family: var(--font-sans);
   overflow: hidden;
   color-scheme: dark;
 }
@@ -91,4 +102,12 @@ a {
 }
 button {
   font-family: inherit;
+}
+
+/* Every numeric reading (carbon intensity, gauge %, MW flow, dates/times,
+   breakdown %) gets this -- one deliberate sans/mono contrast between
+   labels and readings, with figures that actually align in a column. */
+.oko-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }

@@ -98,6 +98,13 @@ CMD ["oko.pipeline", "--export", "/output/forecast_de.json"]
 # time, and does not need rebuilding+redeploying just because a new
 # forecast landed. Port 8000, not 80: `runtime` (and thus this stage) runs
 # as the non-root `oko` user, which can't bind a privileged port.
+# --workers 4: spawn 4 worker processes for parallel request handling;
+# scales horizontally via container replicas backed by a shared read-only
+# output volume (already the deployment model per docker-compose.yml).
 FROM runtime AS serve
+# Self-syncs oko.sqlite3/forecast_*.json/exchanges.json from oko-dataset on
+# startup and every dataset_sync_interval_seconds after -- see
+# oko.api.dataset_sync -- so no /output volume is required.
+ENV DATASET_SYNC_ENABLED=true
 HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://localhost:8000/healthz || exit 1
-CMD ["uvicorn", "oko.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "oko.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]

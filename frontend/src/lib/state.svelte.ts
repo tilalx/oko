@@ -1,5 +1,6 @@
 import type { CurrentBreakdown, ExchangeEdge, ForecastPoint, HistoryPoint } from './api'
-import { COLORBLIND_INTENSITY_STOPS, INTENSITY_STOPS } from './constants'
+import { COLORBLIND_INTENSITY_STOPS, COLORBLIND_PRICE_STOPS, INTENSITY_STOPS, PRICE_STOPS } from './constants'
+import { detectLocale, detectTimeZone, detectHourCycle } from './i18n'
 
 function loadBool(key: string): boolean {
   try {
@@ -22,8 +23,6 @@ function saveBool(key: string, value: boolean) {
  * `let` globals. One instance shared by every component via `$lib/state`. */
 class OkoState {
   selectedZone = $state('DE-LU')
-  /** "direct" | "lifecycle" -- which map/chart intensity series is shown. */
-  activeLayer = $state<'direct' | 'lifecycle'>('direct')
   /** "electricity" | "emissions" -- which Now-tab breakdown is shown. */
   mixView = $state<'electricity' | 'emissions'>('electricity')
 
@@ -50,13 +49,16 @@ class OkoState {
   route = $state(typeof window !== 'undefined' ? window.location.hash.slice(1) : '')
 
   colorblindPalette = $state(loadBool('oko-colorblind'))
-  use24h = $state(loadBool('oko-24h'))
+  use24h = $state(loadBool('oko-24h') ?? detectHourCycle())
   sidebarCollapsed = $state(loadBool('oko-sidebar-collapsed'))
   promoDismissed = $state(loadBool('oko-promo-dismissed'))
   cardVisible = $state(true)
   tilesLight = $state(false)
+  locale = $state(detectLocale())
+  timeZone = $state(detectTimeZone())
 
   activeIntensityStops = $derived(this.colorblindPalette ? COLORBLIND_INTENSITY_STOPS : INTENSITY_STOPS)
+  activePriceStops = $derived(this.colorblindPalette ? COLORBLIND_PRICE_STOPS : PRICE_STOPS)
 
   setColorblind(value: boolean) {
     this.colorblindPalette = value
@@ -90,9 +92,12 @@ class OkoState {
     return Math.max(0, this.historyLength(zone) - 1)
   }
 
+  /** Lifecycle-inclusive intensity when available, falling back to direct
+   * for a zone whose lifecycle model hasn't bootstrapped yet -- OKO's UI
+   * shows one carbon-intensity number, not a direct/lifecycle choice. */
   pointValue(point: HistoryPoint | ForecastPoint | undefined | null): number | null {
     if (!point) return null
-    return this.activeLayer === 'lifecycle' ? (point.value_lifecycle ?? null) : point.value
+    return point.value_lifecycle ?? point.value ?? null
   }
 
   zoneValueAtUnifiedIndex(zone: string, index: number): number | null {

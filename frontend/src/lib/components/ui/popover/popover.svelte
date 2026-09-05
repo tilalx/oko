@@ -32,7 +32,7 @@
       {align}
       {sideOffset}
       class={cn(
-        'z-[500] flex w-[200px] flex-col gap-2 rounded-lg border border-border bg-[var(--card-translucent)] p-3 text-[0.8rem] text-foreground shadow-[0_8px_24px_rgba(0,0,0,0.35)] backdrop-blur-md outline-none',
+        'z-[500] flex w-[200px] flex-col gap-2 rounded-lg border border-border bg-[var(--card-translucent)] p-3 text-[0.8rem] text-foreground shadow-[0_4px_14px_rgba(0,0,0,0.28)] backdrop-blur-md outline-none',
         className
       )}
     >

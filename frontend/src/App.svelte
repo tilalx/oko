@@ -3,6 +3,8 @@
   import { oko } from '$lib/state.svelte'
   import * as api from '$lib/api'
   import { AUTO_REFRESH_INTERVAL_MS, HISTORY_SCRUB_HOURS } from '$lib/constants'
+  import { t } from '$lib/i18n'
+  import { formatFullDateTime } from '$lib/format'
   import Sidebar from '$lib/components/Sidebar.svelte'
   import MapView from '$lib/components/MapView.svelte'
   import TopBadge from '$lib/components/TopBadge.svelte'
@@ -23,8 +25,8 @@
     return () => window.removeEventListener('hashchange', onHashChange)
   })
 
-  let mapView: MapView
-  let status = $state('Loading forecast…')
+  let mapView: MapView | undefined = $state()
+  let status = $state(t('app.loading'))
   let payload = $state<ForecastPayload | null>(null)
 
   async function fetchAllForecasts(zones: string[]) {
@@ -64,15 +66,15 @@
   }
 
   async function loadForecast(zone: string) {
-    status = 'Loading forecast…'
+    status = t('app.loading')
     const { payload: fp, status: httpStatus } = await api.getForecast(zone)
     if (!fp) {
       status =
         httpStatus === 503
-          ? "No forecast available yet for this zone (bootstrapping, or the last run couldn't reach its data sources)."
+          ? t('app.noForecastAvailable')
           : httpStatus === 404
-            ? 'Unknown zone.'
-            : `Failed to load forecast (HTTP ${httpStatus}).`
+            ? t('app.unknownZone')
+            : t('app.fetchError', { statusCode: httpStatus })
       payload = null
       return
     }
@@ -92,8 +94,8 @@
     oko.lastCurrent = fp.current
     payload = fp
     status = fp.forecast?.length
-      ? `Updated ${new Date(fp.generated_at).toLocaleString()} · model ${fp.model_version}`
-      : 'Forecast is empty.'
+      ? `Updated ${formatFullDateTime(new Date(fp.generated_at), oko.use24h, oko.locale)} · model ${fp.model_version}`
+      : t('app.forecastEmpty')
   }
 
   function setSelectedZone(zone: string) {
@@ -132,7 +134,7 @@
       // drags the slider or switches zones.
       oko.horizonIndex = oko.nowSeamIndex(oko.selectedZone)
       oko.horizonAtNow = true
-      await mapView.init()
+      await mapView?.init()
       setSelectedZone('DE-LU')
       interval = setInterval(refreshAllZoneData, AUTO_REFRESH_INTERVAL_MS)
     })()
@@ -144,8 +146,10 @@
   <Sidebar />
   <div class="relative flex-1">
     <MapView bind:this={mapView} onZoneClick={setSelectedZone} />
-    <TopBadge />
-    <MapActions />
+    <div class="absolute top-[1.1rem] right-[1.1rem] z-[500] flex flex-col items-end gap-[0.6rem]">
+      <TopBadge />
+      <MapActions {mapView} />
+    </div>
     <MapLegend />
     <ZoneCard {status} {payload} onSelectZone={setSelectedZone} />
     <Timebar />

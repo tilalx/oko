@@ -34,9 +34,21 @@ from oko.export import (
     write_json,
 )
 from oko.fetchers import entsoe, noaa_gfs
-from oko.forecast.features import build_forecast_features, build_training_features
-from oko.forecast.model import BreakdownModel, CarbonIntensityModel, Prediction
-from oko.history import HistoryRow, load_breakdown_training_rows, load_training_rows, upsert_rows
+from oko.forecast.features import (
+    PRICE_LAG_HOURS,
+    build_forecast_features,
+    build_training_features,
+    with_price_lag,
+)
+from oko.forecast.model import BreakdownModel, CarbonIntensityModel, Prediction, PriceModel
+from oko.history import (
+    HistoryRow,
+    load_breakdown_training_rows,
+    load_price_training_rows,
+    load_recent_prices,
+    load_training_rows,
+    upsert_rows,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -139,6 +151,32 @@ async def _fetch_load_for_zones(
     return dict(result for result in results if result is not None)
 
 
+async def _fetch_price_for_zones(
+    zones: tuple[str, ...],
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    max_concurrency: int = ENTSOE_MAX_CONCURRENCY,
+) -> dict[str, dict[dt.datetime, float]]:
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def _fetch_one(zone: str) -> tuple[str, dict[dt.datetime, float]] | None:
+        async with semaphore:
+            try:
+                records = await entsoe.fetch_day_ahead_prices(
+                    zone, start, end, client=client, settings=settings
+                )
+            except entsoe.EntsoeError as exc:
+                logger.warning("pipeline.price_fetch_failed", zone=zone, error=str(exc))
+                return None
+        return zone, {record.timestamp: record.price_eur_per_mwh for record in records}
+
+    results = await asyncio.gather(*(_fetch_one(zone) for zone in zones))
+    return dict(result for result in results if result is not None)
+
+
 def _current_breakdown(
     production_by_hour: Mapping[dt.datetime, Mapping[str, float]] | None,
     factors: Mapping[str, float],
@@ -176,6 +214,7 @@ def upsert_zone_history(
     load_by_hour: Mapping[dt.datetime, float] | None,
     traced: list[CarbonIntensity],
     settings: Settings,
+    price_by_hour: Mapping[dt.datetime, float] | None = None,
 ) -> int:
     """Upsert calculated intensities to history database."""
     intensity_by_hour = {entry.timestamp: entry for entry in traced}
@@ -197,6 +236,7 @@ def upsert_zone_history(
             breakdown_percent=(
                 power_breakdown_percentages(production_by_hour[row.timestamp])[0] or None
             ),
+            price_eur_per_mwh=(price_by_hour or {}).get(row.timestamp),
         )
         for row in new_feature_rows
         if row.timestamp in intensity_by_hour
@@ -216,6 +256,7 @@ async def _run_zone(
     weather: list[noaa_gfs.WeatherPoint],
     settings: Settings,
     strict: bool,
+    price_by_hour: Mapping[dt.datetime, float] | None = None,
 ) -> dict[str, object] | None:
     if zone != TARGET_ZONE:
         upsert_zone_history(
@@ -224,6 +265,7 @@ async def _run_zone(
             load_by_hour=load_by_hour,
             traced=traced,
             settings=settings,
+            price_by_hour=price_by_hour,
         )
 
     training_rows, training_targets = load_training_rows(settings.sqlite_path, zone)
@@ -260,6 +302,12 @@ async def _run_zone(
         breakdown_model = BreakdownModel.train(breakdown_rows, breakdown_targets)
         breakdown_model.save(model_dir / "breakdown")
 
+    price_rows, price_targets = load_price_training_rows(settings.sqlite_path, zone)
+    price_model: PriceModel | None = None
+    if len(price_rows) >= MIN_TRAINING_ROWS:
+        price_model = PriceModel.train(price_rows, price_targets)
+        price_model.save(model_dir / "price.txt")
+
     forecast_rows = build_forecast_features(weather, reference_time=now)
     direct_predictions = direct_model.predict(forecast_rows)
     lifecycle_by_timestamp = (
@@ -272,6 +320,17 @@ async def _run_zone(
         if breakdown_model is not None
         else {}
     )
+    price_by_timestamp: dict[dt.datetime, float] = {}
+    if price_model is not None:
+        # PRICE_LAG_HOURS > the 120h forecast horizon, so every lag lookup
+        # resolves to an already-observed hour -- never one still ahead.
+        price_lag_history = load_recent_prices(
+            settings.sqlite_path, zone, since=now - dt.timedelta(hours=PRICE_LAG_HOURS + 1)
+        )
+        price_forecast_rows = with_price_lag(forecast_rows, price_lag_history)
+        price_by_timestamp = {
+            p.timestamp: p.price_eur_per_mwh for p in price_model.predict(price_forecast_rows)
+        }
     predictions = [
         Prediction(
             timestamp=p.timestamp,
@@ -279,6 +338,7 @@ async def _run_zone(
             confidence=p.confidence,
             value_lifecycle_g_per_kwh=lifecycle_by_timestamp.get(p.timestamp),
             power_breakdown_percent=breakdown_by_timestamp.get(p.timestamp),
+            price_eur_per_mwh=price_by_timestamp.get(p.timestamp),
         )
         for p in direct_predictions
     ]
@@ -289,6 +349,7 @@ async def _run_zone(
         training_rows=len(training_rows),
         lifecycle_training_rows=len(lifecycle_rows),
         breakdown_training_rows=len(breakdown_rows),
+        price_training_rows=len(price_rows),
         forecast_horizon_hours=len(predictions),
     )
 
@@ -312,6 +373,7 @@ class WindowData:
     load_by_zone: dict[str, dict[dt.datetime, float]]
     traced_series: dict[str, list[CarbonIntensity]]
     direct_factor_tables: dict[str, dict[str, float]]
+    price_by_zone: dict[str, dict[dt.datetime, float]]
 
 
 async def fetch_and_trace_window(
@@ -322,12 +384,13 @@ async def fetch_and_trace_window(
     settings: Settings,
 ) -> WindowData:
     """Fetch and trace flows for production and exchanges."""
-    production, exchanges, load_by_zone = await asyncio.gather(
+    production, exchanges, load_by_zone, price_by_zone = await asyncio.gather(
         _fetch_production_for_zones(
             FLOW_TRACING_ZONES, start, end, client=client, settings=settings
         ),
         _fetch_all_borders(EXCHANGE_BORDERS, start, end, client=client, settings=settings),
         _fetch_load_for_zones(FLOW_TRACING_ZONES, start, end, client=client, settings=settings),
+        _fetch_price_for_zones(FLOW_TRACING_ZONES, start, end, client=client, settings=settings),
     )
 
     direct_factor_tables = {zone: factors_for_zone(zone) for zone in production}
@@ -343,6 +406,7 @@ async def fetch_and_trace_window(
         load_by_zone=load_by_zone,
         traced_series=traced_series,
         direct_factor_tables=direct_factor_tables,
+        price_by_zone=price_by_zone,
     )
 
 
@@ -366,6 +430,7 @@ async def run_pipeline(*, settings: Settings | None = None) -> PipelineResult:
             load_by_hour=window.load_by_zone.get(TARGET_ZONE),
             traced=window.traced_series.get(TARGET_ZONE, []),
             settings=resolved_settings,
+            price_by_hour=window.price_by_zone.get(TARGET_ZONE),
         )
         target_training_rows, _ = load_training_rows(resolved_settings.sqlite_path, TARGET_ZONE)
         if len(target_training_rows) < MIN_TRAINING_ROWS:
@@ -396,6 +461,7 @@ async def run_pipeline(*, settings: Settings | None = None) -> PipelineResult:
                     weather=weather_by_zone[zone],
                     settings=resolved_settings,
                     strict=(zone == TARGET_ZONE),
+                    price_by_hour=window.price_by_zone.get(zone),
                 )
                 for zone in FLOW_TRACING_ZONES
             )

@@ -27,6 +27,7 @@ def test_build_payload_matches_binding_schema() -> None:
             confidence="high",
             value_lifecycle_g_per_kwh=410.2,
             power_breakdown_percent={"coal": 40.0, "wind": 60.0},
+            price_eur_per_mwh=78.421,
         )
     ]
     payload = build_payload(
@@ -52,6 +53,7 @@ def test_build_payload_matches_binding_schema() -> None:
                 "value_lifecycle": 410,
                 "confidence": "high",
                 "power_breakdown_percent": {"coal": 40.0, "wind": 60.0},
+                "price_eur_per_mwh": 78.42,
             },
         ],
         "attribution": list(ATTRIBUTION),
@@ -156,6 +158,7 @@ def test_build_payload_lifecycle_null_when_not_predicted() -> None:
     )
     assert payload["forecast"][0]["value_lifecycle"] is None
     assert payload["forecast"][0]["power_breakdown_percent"] is None
+    assert payload["forecast"][0]["price_eur_per_mwh"] is None
 
 
 def test_build_payload_rounds_value_to_int() -> None:

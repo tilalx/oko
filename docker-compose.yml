@@ -24,10 +24,11 @@ services:
       target: lint
     profiles: ["ci"]
 
-  # Local test of the FastAPI query layer (web UI + evcc endpoint). Reads
-  # ../oko-dataset/forecast_de.json + oko.sqlite3 live -- run oko-pipeline
-  # (or `python -m oko.mockdata --out ../oko-dataset/forecast_de.json`
-  # for local dev) first so those files actually exist, then:
+  # Local test of the FastAPI query layer (web UI + evcc endpoint). Syncs
+  # forecast_de.json + oko.sqlite3 straight from oko-dataset on the GitHub
+  # repo at startup (DATASET_SYNC_ENABLED=true, baked into the `serve`
+  # image -- see oko.api.dataset_sync) and keeps refreshing them every
+  # dataset_sync_interval_seconds -- no local pipeline run or volume needed:
   #   docker compose --profile serve build serve
   #   docker compose --profile serve up serve
   serve:
@@ -38,8 +39,6 @@ services:
       - "8090:8000"
     environment:
       SQLITE_PATH: /output/oko.sqlite3
-    volumes:
-      - ../oko-dataset:/output:ro,z
     profiles: ["serve"]
 
 volumes:

@@ -48,7 +48,9 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _seed_history(db_path: Path, hours: int, *, include_breakdown: bool = False) -> None:
+def _seed_history(
+    db_path: Path, hours: int, *, include_breakdown: bool = False, include_price: bool = False
+) -> None:
     """Seed enough synthetic accumulated history to clear MIN_TRAINING_ROWS."""
     start = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
     rows = [
@@ -69,6 +71,7 @@ def _seed_history(db_path: Path, hours: int, *, include_breakdown: bool = False)
             breakdown_percent=(
                 {"wind": 10.0 + (i % 10), "coal": 90.0 - (i % 10)} if include_breakdown else None
             ),
+            price_eur_per_mwh=(-20.0 + (i % 10) * 15.0) if include_price else None,
         )
         for i in range(hours)
     ]
@@ -170,10 +173,12 @@ def test_run_pipeline_produces_forecast_once_history_is_seeded(tmp_path: Path) -
         "value_lifecycle",
         "confidence",
         "power_breakdown_percent",
+        "price_eur_per_mwh",
     }
     assert first["confidence"] == "high"
     assert isinstance(first["value"], int)
     assert first["power_breakdown_percent"] is None
+    assert first["price_eur_per_mwh"] is None
 
     assert (settings.model_dir / "DE-LU" / "direct.txt").exists()
 
@@ -196,6 +201,22 @@ def test_run_pipeline_forecasts_power_breakdown_once_bootstrapped(tmp_path: Path
     assert {"wind", "coal"} <= set(breakdown)
     assert sum(breakdown.values()) == pytest.approx(100.0)
     assert (settings.model_dir / "DE-LU" / "breakdown" / "breakdown_wind.txt").exists()
+
+
+@respx.mock
+def test_run_pipeline_forecasts_price_once_bootstrapped(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _seed_history(settings.sqlite_path, MIN_TRAINING_ROWS, include_price=True)
+    _mock_all_entsoe_no_data(settings)
+    _mock_noaa_success(settings.noaa_gfs_base_url)
+
+    result = _run(run_pipeline(settings=settings))
+    forecast = result.zones["DE-LU"]["forecast"]
+
+    price = forecast[0]["price_eur_per_mwh"]  # type: ignore[index]
+    assert price is not None
+    assert isinstance(price, float)
+    assert (settings.model_dir / "DE-LU" / "price.txt").exists()
 
 
 @respx.mock
@@ -309,9 +330,15 @@ def test_run_pipeline_computes_flow_traced_intensity_for_fresh_data(
             ]
         raise entsoe.EntsoeError(f"no data for {zone1}-{zone2}")
 
+    async def fake_fetch_day_ahead_prices(
+        zone: str, start: dt.datetime, end: dt.datetime, *, client: object, settings: object
+    ) -> list[entsoe.PriceRecord]:
+        raise entsoe.EntsoeNoDataError(f"no price data for {zone}")
+
     monkeypatch.setattr(entsoe, "fetch_production", fake_fetch_production)
     monkeypatch.setattr(entsoe, "fetch_load", fake_fetch_load)
     monkeypatch.setattr(entsoe, "fetch_exchange", fake_fetch_exchange)
+    monkeypatch.setattr(entsoe, "fetch_day_ahead_prices", fake_fetch_day_ahead_prices)
     _mock_noaa_success(settings.noaa_gfs_base_url)
 
     result = _run(run_pipeline(settings=settings))

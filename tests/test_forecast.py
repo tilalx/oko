@@ -81,7 +81,8 @@ def test_feature_columns_matches_as_dict_keys() -> None:
         residual_load_share=0.7,
         horizon_hours=3,
     )
-    assert tuple(row.as_dict().keys()) == features.FEATURE_COLUMNS
+    assert tuple(row.as_dict().keys()) == features.PRICE_FEATURE_COLUMNS
+    assert tuple(row.as_dict().keys())[: len(features.FEATURE_COLUMNS)] == features.FEATURE_COLUMNS
 
 
 def test_build_training_features_joins_and_skips_missing_hours() -> None:
@@ -117,6 +118,47 @@ def test_build_forecast_features_computes_horizon_and_sorts() -> None:
         HOUR + dt.timedelta(hours=1),
         HOUR + dt.timedelta(hours=2),
     ]
+
+
+def test_with_price_lag_fills_from_matching_hour() -> None:
+    row = features.FeatureRow(
+        timestamp=HOUR,
+        hour_sin=0.1,
+        hour_cos=0.2,
+        dow_sin=0.3,
+        dow_cos=0.4,
+        month_sin=0.5,
+        month_cos=0.6,
+        residual_load_share=0.7,
+        horizon_hours=0,
+    )
+    price_by_hour = {HOUR - dt.timedelta(hours=features.PRICE_LAG_HOURS): 42.5}
+
+    [lagged] = features.with_price_lag([row], price_by_hour)
+
+    assert lagged.price_lag_168h == 42.5
+    # Every other field is untouched.
+    assert lagged.timestamp == row.timestamp
+    assert lagged.residual_load_share == row.residual_load_share
+
+
+def test_with_price_lag_leaves_none_when_hour_missing() -> None:
+    row = features.FeatureRow(
+        timestamp=HOUR,
+        hour_sin=0.1,
+        hour_cos=0.2,
+        dow_sin=0.3,
+        dow_cos=0.4,
+        month_sin=0.5,
+        month_cos=0.6,
+        residual_load_share=0.7,
+        horizon_hours=0,
+    )
+
+    [lagged] = features.with_price_lag([row], {})
+
+    assert lagged.price_lag_168h is None
+    assert math.isnan(lagged.as_dict()["price_lag_168h"])
 
 
 # --------------------------------------------------------------------------
@@ -216,6 +258,80 @@ def test_save_load_roundtrip_produces_identical_predictions(tmp_path: Path) -> N
     trained.save(save_path)
     loaded = model.CarbonIntensityModel.load(save_path)
     after = loaded.predict([query_row])[0].value_g_per_kwh
+
+    assert before == pytest.approx(after)
+
+
+def _synthetic_price_rows(n: int) -> tuple[list[features.FeatureRow], list[float]]:
+    rows, _ = _synthetic_rows(n)
+    # A relationship with a genuinely negative range, unlike carbon
+    # intensity -- price can and does go negative on the day-ahead market.
+    targets = [-50.0 + row.residual_load_share * 200.0 for row in rows]
+    return rows, targets
+
+
+def test_price_model_train_rejects_mismatched_lengths() -> None:
+    rows, targets = _synthetic_price_rows(10)
+    with pytest.raises(ValueError, match="length mismatch"):
+        model.PriceModel.train(rows, targets[:-1])
+
+
+def test_price_model_train_rejects_empty_dataset() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        model.PriceModel.train([], [])
+
+
+def test_price_model_predict_empty_input_returns_empty() -> None:
+    rows, targets = _synthetic_price_rows(50)
+    trained = model.PriceModel.train(rows, targets)
+    assert trained.predict([]) == []
+
+
+def test_price_model_predict_does_not_clamp_negative_values() -> None:
+    class _StubBooster:
+        def predict(self, matrix: object) -> list[float]:
+            return [-5.0, 10.0]
+
+    stub_model = model.PriceModel(_StubBooster())  # type: ignore[arg-type]
+    row = features.FeatureRow(
+        timestamp=HOUR,
+        hour_sin=0,
+        hour_cos=0,
+        dow_sin=0,
+        dow_cos=0,
+        month_sin=0,
+        month_cos=0,
+        residual_load_share=0.5,
+        horizon_hours=1,
+    )
+    predictions = stub_model.predict([row, row])
+    assert predictions[0].price_eur_per_mwh == -5.0
+    assert predictions[1].price_eur_per_mwh == 10.0
+
+
+def test_price_model_train_predict_learns_the_relationship() -> None:
+    rows, targets = _synthetic_price_rows(500)
+    trained = model.PriceModel.train(rows, targets)
+
+    low_share_row = dataclasses.replace(rows[0], residual_load_share=0.0, horizon_hours=1)
+    high_share_row = dataclasses.replace(rows[0], residual_load_share=0.9, horizon_hours=1)
+    predictions = trained.predict([low_share_row, high_share_row])
+
+    assert predictions[0].price_eur_per_mwh < predictions[1].price_eur_per_mwh
+    assert predictions[0].confidence == "high"
+
+
+def test_price_model_save_load_roundtrip_produces_identical_predictions(tmp_path: Path) -> None:
+    rows, targets = _synthetic_price_rows(300)
+    trained = model.PriceModel.train(rows, targets)
+    query_row = dataclasses.replace(rows[0], horizon_hours=10)
+
+    before = trained.predict([query_row])[0].price_eur_per_mwh
+
+    save_path = tmp_path / "price_model.txt"
+    trained.save(save_path)
+    loaded = model.PriceModel.load(save_path)
+    after = loaded.predict([query_row])[0].price_eur_per_mwh
 
     assert before == pytest.approx(after)
 

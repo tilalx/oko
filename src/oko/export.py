@@ -76,6 +76,11 @@ def build_payload(
                 ),
                 "confidence": prediction.confidence,
                 "power_breakdown_percent": prediction.power_breakdown_percent,
+                "price_eur_per_mwh": (
+                    round(prediction.price_eur_per_mwh, 2)
+                    if prediction.price_eur_per_mwh is not None
+                    else None
+                ),
             }
             for prediction in predictions
         ],

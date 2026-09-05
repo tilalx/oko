@@ -36,9 +36,6 @@ webapi.token
 .idea/
 .DS_Store
 
-# gh-pages export artifact (only ever lives on the gh-pages branch)
-de.json
-
 # Frontend build output -- `cd frontend && npm run build` writes straight
 # into oko/api/app.py's StaticFiles mount (see frontend/vite.config.ts).
 # zones.geojson lives in the same directory but is a committed data file,

@@ -11,6 +11,8 @@ from oko.history import (
     HistoryRow,
     init_db,
     load_breakdown_training_rows,
+    load_price_training_rows,
+    load_recent_prices,
     load_training_rows,
     query_recent,
     upsert_rows,
@@ -27,6 +29,7 @@ def _row(
     lifecycle: float | None = None,
     method: str | None = None,
     breakdown: dict[str, float] | None = None,
+    price: float | None = None,
 ) -> HistoryRow:
     return HistoryRow(
         zone="DE-LU",
@@ -45,6 +48,7 @@ def _row(
         lifecycle_g_per_kwh=lifecycle,
         method=method,  # type: ignore[arg-type]
         breakdown_percent=breakdown,
+        price_eur_per_mwh=price,
     )
 
 
@@ -142,6 +146,7 @@ def test_query_recent_respects_since_and_returns_all_fields(tmp_path: Path) -> N
         lifecycle=310.0,
         method="flow_trace",
         breakdown={"wind": 60.0, "coal": 40.0},
+        price=78.42,
     )
     upsert_rows(db_path, [old, recent])
 
@@ -153,15 +158,17 @@ def test_query_recent_respects_since_and_returns_all_fields(tmp_path: Path) -> N
     assert points[0].value_lifecycle_g_per_kwh == 310.0
     assert points[0].method == "flow_trace"
     assert points[0].breakdown_percent == {"wind": 60.0, "coal": 40.0}
+    assert points[0].price_eur_per_mwh == 78.42
 
 
-def test_query_recent_breakdown_is_none_when_not_persisted(tmp_path: Path) -> None:
+def test_query_recent_breakdown_and_price_are_none_when_not_persisted(tmp_path: Path) -> None:
     db_path = tmp_path / "history.sqlite3"
     upsert_rows(db_path, [_row(HOUR, 0.5, 250.0)])
 
     points = query_recent(db_path, "DE-LU", since=HOUR - dt.timedelta(hours=1))
 
     assert points[0].breakdown_percent is None
+    assert points[0].price_eur_per_mwh is None
 
 
 def test_upsert_and_load_breakdown_training_rows_round_trip(tmp_path: Path) -> None:
@@ -181,6 +188,58 @@ def test_load_breakdown_training_rows_on_nonexistent_db_returns_empty(tmp_path: 
     features, breakdowns = load_breakdown_training_rows(tmp_path / "missing.sqlite3", "DE-LU")
     assert features == []
     assert breakdowns == []
+
+
+def test_upsert_and_load_price_training_rows_round_trip(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    with_price = _row(HOUR, 0.5, 200.0, price=78.42)
+    # Day-ahead prices can legitimately go negative -- must round-trip as-is.
+    negative_price = _row(HOUR + dt.timedelta(hours=1), 0.5, 210.0, price=-5.1)
+    without_price = _row(HOUR + dt.timedelta(hours=2), 0.5, 220.0)
+
+    upsert_rows(db_path, [with_price, negative_price, without_price])
+    features, prices = load_price_training_rows(db_path, "DE-LU")
+
+    assert [f.timestamp for f in features] == [HOUR, HOUR + dt.timedelta(hours=1)]
+    assert prices == [78.42, -5.1]
+
+
+def test_load_price_training_rows_fills_168h_lag_from_history(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    week_ago = _row(HOUR - dt.timedelta(hours=168), 0.5, 190.0, price=50.0)
+    target = _row(HOUR, 0.5, 200.0, price=78.42)
+    no_lag_available = _row(HOUR + dt.timedelta(hours=1), 0.5, 210.0, price=-5.1)
+
+    upsert_rows(db_path, [week_ago, target, no_lag_available])
+    rows, prices = load_price_training_rows(db_path, "DE-LU")
+
+    by_timestamp = dict(zip([r.timestamp for r in rows], rows, strict=True))
+    assert by_timestamp[HOUR - dt.timedelta(hours=168)].price_lag_168h is None
+    assert by_timestamp[HOUR].price_lag_168h == 50.0
+    assert by_timestamp[HOUR + dt.timedelta(hours=1)].price_lag_168h is None
+    assert prices == [50.0, 78.42, -5.1]
+
+
+def test_load_price_training_rows_on_nonexistent_db_returns_empty(tmp_path: Path) -> None:
+    features, prices = load_price_training_rows(tmp_path / "missing.sqlite3", "DE-LU")
+    assert features == []
+    assert prices == []
+
+
+def test_load_recent_prices_filters_by_since_and_excludes_null(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    old = _row(HOUR - dt.timedelta(hours=200), 0.5, 100.0, price=10.0)
+    recent = _row(HOUR, 0.5, 200.0, price=78.42)
+    no_price = _row(HOUR + dt.timedelta(hours=1), 0.5, 210.0)
+
+    upsert_rows(db_path, [old, recent, no_price])
+    prices = load_recent_prices(db_path, "DE-LU", since=HOUR - dt.timedelta(hours=1))
+
+    assert prices == {HOUR: 78.42}
+
+
+def test_load_recent_prices_empty_for_missing_db(tmp_path: Path) -> None:
+    assert load_recent_prices(tmp_path / "missing.sqlite3", "DE-LU", since=HOUR) == {}
 
 
 def test_query_recent_empty_for_missing_db(tmp_path: Path) -> None:
@@ -249,3 +308,15 @@ def test_load_breakdown_training_rows_migrates_a_legacy_db_instead_of_raising(
 
     assert features == []
     assert breakdowns == []
+
+
+def test_load_price_training_rows_migrates_a_legacy_db_instead_of_raising(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    _create_legacy_table(db_path)
+
+    features, prices = load_price_training_rows(db_path, "DE-LU")
+
+    assert features == []
+    assert prices == []

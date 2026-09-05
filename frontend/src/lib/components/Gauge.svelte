@@ -23,7 +23,7 @@
       class="transition-[stroke-dasharray] duration-400 ease-out"
     />
   </svg>
-  <div class="absolute inset-0 flex items-center justify-center text-[1.1rem] font-bold">
+  <div class="oko-num absolute inset-0 flex items-center justify-center text-[1.15rem] font-semibold">
     {percent == null ? '—' : Math.round(percent) + '%'}
   </div>
 </div>

@@ -7,7 +7,7 @@
 
 <section
   class={cn(
-    'flex flex-col overflow-hidden rounded-2xl border border-border bg-[var(--card-translucent)] shadow-[0_20px_50px_rgba(0,0,0,0.5)] backdrop-blur-[14px]',
+    'flex flex-col overflow-hidden rounded-lg border border-border bg-[var(--card-translucent)] shadow-[0_4px_14px_rgba(0,0,0,0.28)] backdrop-blur-[14px]',
     className
   )}
 >

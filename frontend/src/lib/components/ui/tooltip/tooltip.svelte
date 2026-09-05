@@ -13,7 +13,7 @@
     <TooltipPrimitive.Portal>
       <TooltipPrimitive.Content
         sideOffset={6}
-        class="z-[700] max-w-[220px] rounded-md border border-border bg-[var(--card-translucent)] px-2 py-1 text-[0.72rem] text-foreground shadow-[0_8px_24px_rgba(0,0,0,0.35)] backdrop-blur-md"
+        class="z-[700] max-w-[220px] rounded-md border border-border bg-[var(--card-translucent)] px-2 py-1 text-[0.72rem] text-foreground shadow-[0_4px_14px_rgba(0,0,0,0.28)] backdrop-blur-md"
       >
         {text}
       </TooltipPrimitive.Content>

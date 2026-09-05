@@ -325,24 +325,9 @@ log`, `git revert <sha>`, `git show <sha>:forecast_de.json` all work
 against it directly, no extra tooling. A run that produces nothing new
 (bootstrap, or every fetch failing that hour) makes no commit.
 
-**Prod host setup** (once, independent of Jenkins):
-
-```bash
-git clone git@github.com:tilalx/oko-dataset.git /data/oko-dataset
-# cron, staggered off the hourly publish so a pull usually lands on a
-# fresh commit rather than racing it:
-echo '*/5 * * * *  git -C /data/oko-dataset pull --ff-only --quiet origin main' \
-  | crontab -
-```
-
-`oko-serve` (see below) mounts `/data/oko-dataset` read-only and reads
-`EXPORT_PATH`/`SQLITE_PATH` from it directly — it never needs restarting
-just because new data landed, the next `git pull` alone is enough. A
-request that lands mid-pull can in principle see a moment of
-inconsistency between files (or a transient SQLite read error) — rare at
-this project's traffic level, and self-heals on the next request.
-Rolling back bad data is `git revert <sha> --no-edit && git push` against
-`oko-dataset`; the next cron pull (≤5 min) serves the reverted data.
+**Prod host setup**: none needed — `oko-serve` syncs `oko-dataset` itself,
+straight from GitHub, no clone/cron/volume required (see "Running
+`oko-serve`" below).
 
 **Code builds** (`Build Server Image`, on `main` pushes/merges): builds
 the FastAPI query layer (`Dockerfile`'s `serve` target, `src/oko/api/`)
@@ -362,18 +347,28 @@ docker run -d \
   --name oko-serve \
   --restart unless-stopped \
   --network oko-net \
-  -e EXPORT_PATH=/data/oko-dataset/forecast_de.json \
-  -e SQLITE_PATH=/data/oko-dataset/oko.sqlite3 \
-  -v /data/oko-dataset:/data/oko-dataset:ro \
+  -e SQLITE_PATH=/output/oko.sqlite3 \
   oko-serve:latest
 ```
 
+No volume, no host-side clone or cron: the `serve` image ships with
+`DATASET_SYNC_ENABLED=true` baked in, so on startup — and every
+`DATASET_SYNC_INTERVAL_SECONDS` after (default 600, aligned to the
+wall-clock `:00/:10/:20/...` marks) — the container downloads
+`oko.sqlite3`, each zone's `forecast_*.json`, and `exchanges.json` straight
+from `oko-dataset`'s raw GitHub files into its own filesystem (see
+`src/oko/api/dataset_sync.py`). A request landing mid-sync can in principle
+see a moment of inconsistency between files (or a transient SQLite read
+error) — rare at this project's traffic level, and self-heals on the next
+request. Rolling back bad data is `git revert <sha> --no-edit && git push`
+against `oko-dataset`; the next sync tick serves the reverted data.
+Point `DATASET_REPO`/`DATASET_REF` at a fork if you publish your own
+dataset elsewhere.
+
 If your reverse proxy lives on the bare host instead of Docker, drop
 `--network oko-net` and add `-p 127.0.0.1:8090:8000` instead, then point
-the proxy at `127.0.0.1:8090`. `oko-serve` mounts the same
-`/data/oko-dataset` clone from "Prod host setup" above — no rebuild or
-redeploy needed as new data lands there, only for a new code build. It
-exposes:
+the proxy at `127.0.0.1:8090`. No rebuild or redeploy is needed as new
+data lands in `oko-dataset`, only for a new code build. It exposes:
 
 - `GET /de.json` / `GET /{zone}.json` — the forecast, with permissive CORS.
 - `GET /api/evcc/co2` / `GET /api/evcc/co2/{zone}` — the forecast,
@@ -391,12 +386,12 @@ privileged port), on the `oko-net` network — for example a Caddy
 `reverse_proxy oko-serve:8000` block, or a Traefik label-based route,
 whichever you already run.
 
-Because the container reads each zone's export file live, a run that
-produces no new forecast for a given zone (bootstrap, or that zone's
-NOAA/ENTSO-E fetch failing that hour) has no effect on what's served for
-it — the previous file is still sitting in the mount, so that zone's
-endpoint never goes dark, it just serves slightly stale data until the
-next successful run. If a zone has *never* produced a forecast yet
+Because the container only overwrites a file once a new version has
+actually been downloaded, a run that produces no new forecast for a given
+zone (bootstrap, or that zone's NOAA/ENTSO-E fetch failing that hour) has
+no effect on what's served for it — the previously synced file is still
+there, so that zone's endpoint never goes dark, it just serves slightly
+stale data until the next successful run. If a zone has *never* produced a forecast yet
 (fresh install, or that zone bootstrapping independently of DE-LU), its
 `/{zone}.json`, `/api/evcc/co2/{zone}`, and `/history/{zone}` return
 `503`/empty until the first one lands — check `GET /zones` for current
@@ -424,7 +419,7 @@ zone, e.g. `/FR.json`) return the same shape — see `/openapi.json` or
     "emissions_breakdown_percent": { "coal": 68.4, "gas": 31.6 }
   },
   "forecast": [
-    { "timestamp": "2026-09-01T07:00:00Z", "value": 342, "value_lifecycle": 410, "confidence": "high" }
+    { "timestamp": "2026-09-01T07:00:00Z", "value": 342, "value_lifecycle": 410, "confidence": "high", "price_eur_per_mwh": 78.42 }
   ],
   "attribution": [
     "ENTSO-E Transparency Platform (CC-BY 4.0)",
@@ -450,6 +445,11 @@ zone, e.g. `/FR.json`) return the same shape — see `/openapi.json` or
   dominate the first and be entirely absent from the second.
 - `value_lifecycle` is `null` until that zone's lifecycle model has
   bootstrapped (see "Bootstrap behaviour").
+- `price_eur_per_mwh` is the predicted day-ahead auction price and can be
+  negative; `null` until that zone's price model has bootstrapped. It's
+  trained on the same feature set as the intensity models (calendar +
+  renewables-share proxy) with no fuel-cost or demand-level signal, so
+  treat it as a rough baseline, not a validated price forecast.
 - `GET /history/{zone}?hours=N` (default 48, capped at 720) returns that
   zone's recent raw observed values, each tagged with which method
   produced it (`"flow_trace"` or `"one_hop_fallback"`).

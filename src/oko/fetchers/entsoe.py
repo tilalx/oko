@@ -11,11 +11,13 @@ cross-border net-flow computation are OKO-original, written against the
 official ENTSO-E REST endpoint (``https://web-api.tp.entsoe.eu/api``)
 rather than electricitymaps' internal proxy.
 
-Two document types are used:
+Document types used:
 
 - ``A75``/``A16`` ("Actual generation per type", realised) for production.
 - ``A11`` ("Aggregated energy data report") for cross-border physical
   flows, queried in both directions per border and netted.
+- ``A65``/``A16`` ("System total load", realised) for total load.
+- ``A44`` ("Price Document") for day-ahead auction prices.
 
 Storage technologies (hydro pumped storage / battery, PSR codes B10/B25)
 are excluded from the production mix entirely rather than tracking their
@@ -156,7 +158,7 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _parse_period_points(
-    period: dict[str, Any], curve_type: str
+    period: dict[str, Any], curve_type: str, value_field: str = "quantity"
 ) -> list[tuple[dt.datetime, float]]:
     """Expand one ``<Period>`` element into ``(timestamp, value)`` pairs.
 
@@ -167,6 +169,9 @@ def _parse_period_points(
     Args:
         period: the xmltodict-parsed ``<Period>`` element.
         curve_type: the parent TimeSeries's ``<curveType>`` value.
+        value_field: the ``<Point>`` child element holding the value
+            (``"quantity"`` for generation/load/flow documents,
+            ``"price.amount"`` for the day-ahead price document).
 
     Returns:
         A list of ``(timestamp, value)`` tuples, one per resolution step
@@ -178,7 +183,7 @@ def _parse_period_points(
     start = dt.datetime.fromisoformat(period["timeInterval"]["start"].replace("Z", "+00:00"))
     resolution = _resolution_to_timedelta(str(period["resolution"]))
     points = sorted(
-        ((int(p["position"]), float(p["quantity"])) for p in _as_list(period.get("Point"))),
+        ((int(p["position"]), float(p[value_field])) for p in _as_list(period.get("Point"))),
         key=lambda pv: pv[0],
     )
     if not points:
@@ -489,4 +494,81 @@ async def fetch_exchange(
         for ts in timestamps
     ]
     logger.info("entsoe.exchange_fetched", border=f"{zone_from}-{zone_to}", hours=len(records))
+    return records
+
+
+@dataclass(frozen=True, slots=True)
+class PriceRecord:
+    """Hourly day-ahead auction price for one zone.
+
+    Attributes:
+        zone: OKO zone key.
+        timestamp: start of the hour, UTC.
+        price_eur_per_mwh: day-ahead price in EUR/MWh. Can be negative.
+    """
+
+    zone: str
+    timestamp: dt.datetime
+    price_eur_per_mwh: float
+
+
+async def fetch_day_ahead_prices(
+    zone: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    client: httpx.AsyncClient,
+    settings: Settings,
+) -> list[PriceRecord]:
+    """Fetch hourly day-ahead auction prices for a zone.
+
+    Args:
+        zone: OKO zone key, must be a key of ``ENTSOE_DOMAIN_MAPPINGS``.
+        start: start of the query window (UTC).
+        end: end of the query window (UTC), exclusive.
+        client: shared HTTP client.
+        settings: application settings (token, base URL, timeout).
+
+    Returns:
+        One ``PriceRecord`` per hour in ``[start, end)`` for which
+        ENTSO-E published a day-ahead price. Not every OKO zone clears
+        its own day-ahead auction (some sub-zones price off a
+        neighbour's), in which case ENTSO-E reports no data.
+
+    Raises:
+        EntsoeNoDataError: if the zone has no day-ahead price data for
+            this window.
+        EntsoeError: if the zone is unknown, the request fails, or the
+            response can't be parsed. Callers are responsible for
+            catching this per-zone so a single zone's failure doesn't
+            abort the whole pipeline run.
+    """
+    if zone not in ENTSOE_DOMAIN_MAPPINGS:
+        raise EntsoeError(f"Unknown zone for ENTSO-E price query: {zone!r}")
+
+    domain = ENTSOE_DOMAIN_MAPPINGS[zone]
+    params = {
+        "documentType": "A44",
+        "in_Domain": domain,
+        "out_Domain": domain,
+        **_period_span(start, end),
+    }
+    parsed = await _request_entsoe(client, settings, params)
+    document = parsed.get("Publication_MarketDocument", {})
+
+    by_timestamp: dict[dt.datetime, float] = {}
+    for timeseries in _as_list(document.get("TimeSeries")):
+        curve_type = str(timeseries.get("curveType", "A01"))
+        for period in _as_list(timeseries.get("Period")):
+            for timestamp, value in _parse_period_points(
+                period, curve_type, value_field="price.amount"
+            ):
+                if start <= timestamp < end:
+                    by_timestamp[timestamp] = value
+
+    records = [
+        PriceRecord(zone=zone, timestamp=ts, price_eur_per_mwh=value)
+        for ts, value in sorted(by_timestamp.items())
+    ]
+    logger.info("entsoe.prices_fetched", zone=zone, hours=len(records))
     return records

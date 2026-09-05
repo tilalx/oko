@@ -85,6 +85,7 @@ def client_with_two_zones(tmp_path: Path) -> Iterator[TestClient]:
                 lifecycle_g_per_kwh=310.0,
                 method="flow_trace",
                 breakdown_percent={"wind": 60.0, "coal": 40.0},
+                price_eur_per_mwh=78.42,
             ),
         ],
     )
@@ -164,9 +165,9 @@ def test_built_frontend_js_bundle_served() -> None:
     from oko.api.app import STATIC_DIR
 
     bundles = list((STATIC_DIR / "assets").glob("*.js"))
-    assert bundles, (
-        "expected a built JS bundle under static/assets/ -- run `cd frontend && npm run build`"
-    )
+    assert (
+        bundles
+    ), "expected a built JS bundle under static/assets/ -- run `cd frontend && npm run build`"
     response = TestClient(app).get(f"/assets/{bundles[0].name}")
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
@@ -219,6 +220,7 @@ def test_history_endpoint_returns_seeded_points(client_with_two_zones: TestClien
     assert points[0]["value_lifecycle"] == 310.0
     assert points[0]["method"] == "flow_trace"
     assert points[0]["power_breakdown_percent"] == {"wind": 60.0, "coal": 40.0}
+    assert points[0]["price_eur_per_mwh"] == 78.42
 
 
 def test_history_endpoint_404_for_unknown_zone(client_with_two_zones: TestClient) -> None:

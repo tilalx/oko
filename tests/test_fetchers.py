@@ -153,6 +153,74 @@ def test_fetch_load_rejects_unknown_zone() -> None:
 
 
 # --------------------------------------------------------------------------
+# ENTSO-E: day-ahead price
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+def test_fetch_day_ahead_prices_returns_hourly_records() -> None:
+    settings = _settings()
+    fixture_xml = (FIXTURES / "entsoe_price_de.xml").read_text()
+    respx.get(settings.entsoe_base_url, params={"documentType": "A44"}).mock(
+        return_value=httpx.Response(200, text=fixture_xml)
+    )
+
+    async def go() -> list[entsoe.PriceRecord]:
+        async with httpx.AsyncClient() as client:
+            return await entsoe.fetch_day_ahead_prices(
+                "DE-LU",
+                dt.datetime(2026, 8, 31, 0, tzinfo=dt.UTC),
+                dt.datetime(2026, 8, 31, 2, tzinfo=dt.UTC),
+                client=client,
+                settings=settings,
+            )
+
+    records = _run(go())
+
+    assert records[0].timestamp == dt.datetime(2026, 8, 31, 0, tzinfo=dt.UTC)
+    assert records[0].price_eur_per_mwh == pytest.approx(78.42)
+    # Day-ahead prices can legitimately go negative -- must not be clamped.
+    assert records[1].price_eur_per_mwh == pytest.approx(-5.10)
+
+
+def test_fetch_day_ahead_prices_rejects_unknown_zone() -> None:
+    settings = _settings()
+
+    async def go() -> None:
+        async with httpx.AsyncClient() as client:
+            await entsoe.fetch_day_ahead_prices(
+                "XX",
+                dt.datetime(2026, 8, 31, tzinfo=dt.UTC),
+                dt.datetime(2026, 8, 31, 1, tzinfo=dt.UTC),
+                client=client,
+                settings=settings,
+            )
+
+    with pytest.raises(entsoe.EntsoeError, match="Unknown zone"):
+        _run(go())
+
+
+@respx.mock
+def test_fetch_day_ahead_prices_no_data_raises_typed_error() -> None:
+    settings = _settings()
+    fixture_xml = (FIXTURES / "entsoe_no_data.xml").read_text()
+    respx.get(settings.entsoe_base_url).mock(return_value=httpx.Response(200, text=fixture_xml))
+
+    async def go() -> None:
+        async with httpx.AsyncClient() as client:
+            await entsoe.fetch_day_ahead_prices(
+                "DE-LU",
+                dt.datetime(2026, 8, 31, tzinfo=dt.UTC),
+                dt.datetime(2026, 8, 31, 1, tzinfo=dt.UTC),
+                client=client,
+                settings=settings,
+            )
+
+    with pytest.raises(entsoe.EntsoeNoDataError):
+        _run(go())
+
+
+# --------------------------------------------------------------------------
 # ENTSO-E: exchange
 # --------------------------------------------------------------------------
 

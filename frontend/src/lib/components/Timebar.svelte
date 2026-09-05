@@ -1,7 +1,9 @@
 <script lang="ts">
   import { oko } from '$lib/state.svelte'
+  import { t } from '$lib/i18n'
   import { formatDate, formatTime } from '$lib/format'
   import { Slider } from '$lib/components/ui/slider'
+  import Icon from './Icon.svelte'
 
   let playTimer: ReturnType<typeof setInterval> | null = $state(null)
 
@@ -18,7 +20,7 @@
     for (let d = 0; d < dayCount; d++) {
       const idx = Math.min(d * 24, points.length - 1)
       const date = new Date(points[idx].timestamp)
-      labels.push(date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' }))
+      labels.push(date.toLocaleDateString(oko.locale, { weekday: 'short', day: 'numeric' }))
     }
     return labels
   })
@@ -27,10 +29,10 @@
     if (!point) return ''
     const offset = oko.horizonIndex - nowSeam
     return offset === 0
-      ? 'now'
+      ? t('timebar.nowLabel')
       : offset > 0
-        ? `+${offset}h · ${(point as any).confidence} confidence`
-        : `${offset}h · observed`
+        ? t('timebar.offsetConfidence', { offset: offset, confidence: (point as any).confidence })
+        : t('timebar.offsetObserved', { offset: offset })
   })
 
   function onSliderChange(value: number) {
@@ -53,28 +55,28 @@
 
 <div class="absolute right-0 bottom-0 left-0 z-[600] border-t border-border bg-[var(--card-translucent)] px-5 pt-[0.6rem] pb-[0.55rem] backdrop-blur-[14px]">
   <div class="mb-[0.35rem] flex items-center gap-[0.9rem]">
-    <div class="flex items-baseline gap-2 text-[0.85rem]">
-      <span class="font-semibold">{point ? formatDate(new Date(point.timestamp)) : '—'}</span>
-      <span class="text-muted-foreground">{point ? formatTime(new Date(point.timestamp), oko.use24h) : '—'}</span>
+    <div class="oko-num flex items-baseline gap-2 text-[0.85rem]">
+      <span class="font-semibold">{point ? formatDate(new Date(point.timestamp), oko.locale) : '—'}</span>
+      <span class="text-muted-foreground">{point ? formatTime(new Date(point.timestamp), oko.use24h, oko.locale) : '—'}</span>
     </div>
     <button
       class="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-white/5 text-[0.7rem] hover:bg-white/10"
-      aria-label="Play through forecast"
+      aria-label={t('timebar.playLabel')}
       onclick={togglePlay}
     >
-      {playTimer ? '⏸' : '▶'}
+      <Icon name={playTimer ? 'pause' : 'play'} size="0.8em" />
     </button>
     <div class="flex-1"></div>
-    <div class="text-[0.72rem] text-muted-foreground">{hint}</div>
+    <div class="oko-num text-[0.72rem] text-muted-foreground">{hint}</div>
   </div>
   <div class="relative">
     <Slider value={oko.horizonIndex} {max} step={1} onValueChange={onSliderChange} />
     <div
-      class="pointer-events-none absolute top-[0.15rem] bottom-[0.15rem] w-[2px] bg-[var(--accent-color)] opacity-85"
+      class="pointer-events-none absolute top-[0.15rem] bottom-[0.15rem] w-[2px] bg-[var(--accent-live)]"
       style="left: {nowMarkerPct}%"
     ></div>
   </div>
-  <div class="mt-[0.1rem] flex justify-between text-[0.68rem] text-muted-foreground">
+  <div class="oko-num mt-[0.1rem] flex justify-between text-[0.68rem] text-muted-foreground">
     {#each dayTicks as label, i (i)}
       <span>{label}</span>
     {/each}

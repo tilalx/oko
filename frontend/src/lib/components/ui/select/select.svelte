@@ -45,7 +45,7 @@
   <SelectPrimitive.Portal>
     <SelectPrimitive.Content
       class={cn(
-        'z-[700] max-h-72 overflow-y-auto rounded-lg border border-border bg-[var(--card-translucent)] p-1 text-sm text-foreground shadow-[0_8px_24px_rgba(0,0,0,0.4)] backdrop-blur-md',
+        'z-[700] max-h-72 overflow-y-auto rounded-lg border border-border bg-[var(--card-translucent)] p-1 text-sm text-foreground shadow-[0_4px_14px_rgba(0,0,0,0.28)] backdrop-blur-md',
         className
       )}
       sideOffset={4}

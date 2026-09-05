@@ -8,7 +8,7 @@
         default: 'bg-primary text-primary-foreground hover:opacity-90',
         outline: 'border border-border bg-transparent text-foreground hover:bg-accent',
         ghost: 'bg-transparent text-muted-foreground hover:bg-accent hover:text-foreground',
-        icon: 'bg-[var(--card-translucent)] backdrop-blur-md border border-border text-foreground shadow-[0_8px_24px_rgba(0,0,0,0.3)] hover:bg-[#24271f]',
+        icon: 'bg-[var(--card-translucent)] backdrop-blur-md border border-border text-foreground shadow-[0_4px_14px_rgba(0,0,0,0.28)] hover:bg-[#24271f]',
       },
       size: {
         default: 'h-9 px-4 py-2',
@@ -49,7 +49,7 @@
 <button
   class={cn(
     buttonVariants({ variant, size }),
-    active && 'text-[var(--accent-color)] border-[rgba(70,196,145,0.4)]',
+    active && 'text-[var(--accent-color)] border-[rgba(53,199,192,0.4)]',
     className
   )}
   {...restProps}

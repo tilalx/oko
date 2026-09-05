@@ -9,6 +9,7 @@ export interface ForecastPoint {
   value_lifecycle: number | null
   confidence: 'high' | 'medium' | 'low'
   power_breakdown_percent: Record<string, number> | null
+  price_eur_per_mwh: number | null
 }
 
 export interface CurrentBreakdown {
@@ -37,6 +38,7 @@ export interface HistoryPoint {
   value_lifecycle: number | null
   method: 'flow_trace' | 'one_hop_fallback' | null
   power_breakdown_percent: Record<string, number> | null
+  price_eur_per_mwh: number | null
 }
 
 export interface ZoneStatus {

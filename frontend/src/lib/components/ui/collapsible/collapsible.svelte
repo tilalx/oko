@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Collapsible as CollapsiblePrimitive } from 'bits-ui'
+  import Icon from '../../Icon.svelte'
   import type { Snippet } from 'svelte'
 
   let {
@@ -14,7 +15,7 @@
     class="flex w-full items-center justify-between gap-2 truncate rounded-lg px-[0.6rem] py-2 text-[0.87rem] text-muted-foreground hover:bg-white/5 hover:text-foreground"
   >
     {@render trigger()}
-    <span class="text-[0.7rem]">{open ? '︿' : '﹀'}</span>
+    <Icon name="chevron-right" size="0.8em" class="shrink-0 transition-transform {open ? 'rotate-90' : ''}" />
   </CollapsiblePrimitive.Trigger>
   <CollapsiblePrimitive.Content class="pl-2">
     {@render children()}

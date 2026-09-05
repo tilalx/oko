@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import structlog
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = structlog.get_logger(__name__)
 
 TARGET_ZONE = "DE-LU"
 
@@ -314,6 +317,29 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO")
     model_version: str = Field(default="0.1.0")
+
+    dataset_repo: str = Field(
+        default="tilalx/oko-dataset",
+        description="GitHub 'owner/repo' that oko-serve syncs published data from.",
+    )
+    dataset_ref: str = Field(default="main")
+    dataset_sync_interval_seconds: int = Field(default=600)
+    dataset_sync_enabled: bool = Field(
+        default=False,
+        description="Periodically fetch oko.sqlite3/forecast_*.json/exchanges.json "
+        "from dataset_repo instead of relying on a mounted volume. Off by default so "
+        "tests and the pipeline/runtime image never make network calls for this.",
+    )
+
+    def model_post_init(self, __context: object) -> None:
+        """Validate configuration and log warnings."""
+        if not self.entsoe_token:
+            logger.warning(
+                "config.entsoe_token_not_configured",
+                detail="Day-ahead price data (price_eur_per_mwh) will not be available. "
+                "To enable price forecasting, set ENTSOE_TOKEN environment variable to your "
+                "ENTSO-E Transparency Platform API token (see README for setup instructions).",
+            )
 
     @property
     def source_repo_url(self) -> str:

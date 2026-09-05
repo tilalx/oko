@@ -34,9 +34,16 @@ from __future__ import annotations
 import datetime as dt
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from oko.fetchers.noaa_gfs import WeatherPoint
+
+#: How far back the day-ahead price autocorrelation feature looks --
+#: chosen as 168h (same weekday+hour, one week prior) rather than 24h
+#: because 168h > OKO's 120h forecast horizon, so the lookup always
+#: resolves to a real, already-observed price -- never a value that
+#: would itself need to be forecast recursively.
+PRICE_LAG_HOURS = 168
 
 #: Wind speed (m/s) at which the proxy signal saturates — roughly a
 #: turbine's rated wind speed, above which additional speed adds little
@@ -63,6 +70,11 @@ class FeatureRow:
         horizon_hours: hours ahead of the forecast's reference time this
             row is for; ``0`` for historical training rows (not a
             forecast at all, so there's no horizon to speak of).
+        price_lag_168h: the day-ahead price ``PRICE_LAG_HOURS`` before
+            this row's timestamp, if known -- ``PriceModel``-only feature
+            (see ``PRICE_FEATURE_COLUMNS``); ``None``/unset for every
+            other model, and for price rows where that lag isn't yet in
+            history (bootstrap window).
     """
 
     timestamp: dt.datetime
@@ -74,9 +86,15 @@ class FeatureRow:
     month_cos: float
     residual_load_share: float
     horizon_hours: int
+    price_lag_168h: float | None = None
 
     def as_dict(self) -> dict[str, float]:
-        """Return the model-input columns (excludes ``timestamp``) as a plain dict."""
+        """Return the model-input columns (excludes ``timestamp``) as a plain dict.
+
+        ``price_lag_168h`` is emitted as NaN when unset -- LightGBM
+        handles missing values natively, and NaN (unlike ``0.0``) can't
+        be mistaken for a real observed price.
+        """
         return {
             "hour_sin": self.hour_sin,
             "hour_cos": self.hour_cos,
@@ -86,6 +104,9 @@ class FeatureRow:
             "month_cos": self.month_cos,
             "residual_load_share": self.residual_load_share,
             "horizon_hours": float(self.horizon_hours),
+            "price_lag_168h": (
+                self.price_lag_168h if self.price_lag_168h is not None else math.nan
+            ),
         }
 
 
@@ -101,6 +122,10 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "residual_load_share",
     "horizon_hours",
 )
+
+#: ``PriceModel``'s column set -- ``FEATURE_COLUMNS`` plus the price-lag
+#: autocorrelation feature (see ``with_price_lag``).
+PRICE_FEATURE_COLUMNS: tuple[str, ...] = (*FEATURE_COLUMNS, "price_lag_168h")
 
 
 def _cyclical_encoding(value: float, period: float) -> tuple[float, float]:
@@ -168,6 +193,27 @@ def residual_load_share_from_weather(wind_speed_10m_ms: float, dswrf_wm2: float)
     # model" boundary.
     renewable_proxy = 0.65 * wind_proxy + 0.35 * solar_proxy
     return min(max(1.0 - renewable_proxy, 0.0), 1.0)
+
+
+def with_price_lag(
+    rows: Sequence[FeatureRow], price_by_hour: Mapping[dt.datetime, float]
+) -> list[FeatureRow]:
+    """Return copies of ``rows`` with ``price_lag_168h`` filled from ``price_by_hour``.
+
+    Args:
+        rows: feature rows to attach a lag to (training or forecast rows).
+        price_by_hour: observed day-ahead prices, hour -> EUR/MWh --
+            typically every price already persisted in history, so the
+            lookup at ``row.timestamp - PRICE_LAG_HOURS`` hours resolves
+            whenever that hour has been observed.
+
+    Returns:
+        One ``FeatureRow`` per input row, same order, with
+        ``price_lag_168h`` set (or left ``None`` if that hour isn't in
+        ``price_by_hour``).
+    """
+    lag = dt.timedelta(hours=PRICE_LAG_HOURS)
+    return [replace(row, price_lag_168h=price_by_hour.get(row.timestamp - lag)) for row in rows]
 
 
 def build_training_features(

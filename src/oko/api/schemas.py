@@ -39,6 +39,11 @@ class ForecastPoint(BaseModel):
         description="Predicted generation category -> percent of total production for this "
         "hour -- null until this zone's breakdown model has bootstrapped.",
     )
+    price_eur_per_mwh: float | None = Field(
+        default=None,
+        description="Predicted day-ahead auction price, EUR/MWh -- can be negative; null until "
+        "this zone's price model has bootstrapped.",
+    )
 
 
 class CurrentBreakdown(BaseModel):
@@ -103,6 +108,11 @@ class HistoryPoint(BaseModel):
         description="Observed generation category -> percent of total production for this hour "
         "-- null for rows persisted before this column existed, or hours with no usable "
         "production data.",
+    )
+    price_eur_per_mwh: float | None = Field(
+        default=None,
+        description="Observed day-ahead auction price, EUR/MWh -- can be negative; null for rows "
+        "persisted before this column existed, or zones/hours with no cleared auction.",
     )
 
 

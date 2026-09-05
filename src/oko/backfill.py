@@ -113,6 +113,7 @@ async def backfill(hours: int, *, settings: Settings | None = None) -> dict[str,
                     load_by_hour=window.load_by_zone.get(zone),
                     traced=window.traced_series.get(zone, []),
                     settings=settings,
+                    price_by_hour=window.price_by_zone.get(zone),
                 )
 
     for zone in FLOW_TRACING_ZONES:
