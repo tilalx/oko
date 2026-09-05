@@ -27,7 +27,7 @@ api = ["fastapi>=0.141.1", "uvicorn>=0.30", "limits>=5.8.0"]
 dev = [
     "pytest>=8.2",
     "pytest-cov>=7.1.0",
-    "pytest-mock>=3.14",
+    "pytest-mock>=3.15.1",
     "respx>=0.21",
     "ruff>=0.16.5",
     "mypy>=1.10",
