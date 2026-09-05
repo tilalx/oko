@@ -31,7 +31,7 @@ dev = [
     "respx>=0.21",
     "ruff>=0.16.5",
     "mypy>=1.10",
-    "pandas-stubs>=2.2",
+    "pandas-stubs>=3.0.5.260730",
     "types-xmltodict>=1.0.1.20260518",
 ]
 
