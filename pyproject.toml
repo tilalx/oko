@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-api = ["fastapi>=0.141.1", "uvicorn>=0.30", "limits>=5.8.0"]
+api = ["fastapi>=0.141.1", "uvicorn>=0.52.4", "limits>=5.8.0"]
 
 [dependency-groups]
 dev = [
