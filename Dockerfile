@@ -54,7 +54,8 @@ RUN uv run pytest
 # ---- runtime: minimal, non-root, no dev/test deps --------------------------
 FROM python:3.12-slim AS runtime
 # libgomp1: OpenMP runtime required by lightgbm's native library.
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+# git-lfs: required for dataset sync to resolve LFS pointers
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 git-lfs \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
 ENV PYTHONUNBUFFERED=1 \
