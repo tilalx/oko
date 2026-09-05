@@ -37,34 +37,31 @@ async def _sync(settings: Settings) -> None:
 def test_sync_clones_repo_and_pulls_lfs(tmp_path: Path, mocker: pytest.MockerFixture) -> None:
     """Verify sync clones repo and runs git lfs pull."""
     settings = _settings(tmp_path)
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir()
 
-    # Mock subprocess.run to create dummy files in the clone dir
-    def mock_run(*args, **kwargs):
-        cmd = args[0] if args else kwargs.get("args", [])
-        if "clone" in cmd:
-            repo_path.mkdir(exist_ok=True)
-            (repo_path / "oko.sqlite3").write_bytes(b"sqlite-bytes")
-            (repo_path / "forecast_de.json").write_bytes(b'{"zone": "DE"}')
-            (repo_path / "exchanges.json").write_bytes(b'{"exchanges": []}')
-        return mock.MagicMock(returncode=0)
+    # Create a mock repo directory with files
+    repo_root = tmp_path / "mock_repo"
+    repo_root.mkdir()
+    (repo_root / "dataset").mkdir()
+    (repo_root / "dataset" / "oko.sqlite3").write_bytes(b"sqlite-bytes")
+    (repo_root / "dataset" / "forecast_de.json").write_bytes(b'{"zone": "DE"}')
+    (repo_root / "dataset" / "exchanges.json").write_bytes(b'{"exchanges": []}')
 
-    mocker.patch("subprocess.run", side_effect=mock_run)
-    mocker.patch("tempfile.TemporaryDirectory")
-
-    # Mock tempfile.TemporaryDirectory to use our tmp_path
-    def mock_tmpdir():
-        class TmpDirCtx:
+    def mock_tmpdir_contextmanager():
+        class MockContextManager:
             def __enter__(self):
-                return str(tmp_path)
+                return str(repo_root)
 
             def __exit__(self, *args):
                 pass
 
-        return TmpDirCtx()
+        return MockContextManager()
 
-    mocker.patch("oko.api.dataset_sync.tempfile.TemporaryDirectory", mock_tmpdir)
+    def mock_run(*args, **kwargs):
+        # Simulate successful git commands
+        return mock.MagicMock(returncode=0)
+
+    mocker.patch("oko.api.dataset_sync.tempfile.TemporaryDirectory", mock_tmpdir_contextmanager)
+    mocker.patch("oko.api.dataset_sync.subprocess.run", side_effect=mock_run)
 
     _run(_sync(settings))
 
@@ -73,34 +70,31 @@ def test_sync_clones_repo_and_pulls_lfs(tmp_path: Path, mocker: pytest.MockerFix
     assert (tmp_path / "exchanges.json").read_bytes() == b'{"exchanges": []}'
 
 
-def test_sync_handles_missing_files(tmp_path: Path, mocker: pytest.MockerFixture) -> None:
-    """Verify sync handles missing forecast files gracefully."""
+def test_sync_handles_clone_failure_gracefully(
+    tmp_path: Path, mocker: pytest.MockerFixture
+) -> None:
+    """Verify sync handles git clone failure without raising."""
     settings = _settings(tmp_path)
-    repo_path = tmp_path / "repo"
 
     def mock_run(*args, **kwargs):
-        repo_path.mkdir(exist_ok=True)
-        # Only create sqlite3, not forecast files
-        (repo_path / "oko.sqlite3").write_bytes(b"sqlite-bytes")
-        return mock.MagicMock(returncode=0)
+        raise FileNotFoundError("git command not found")
 
-    mocker.patch("subprocess.run", side_effect=mock_run)
-
-    def mock_tmpdir():
-        class TmpDirCtx:
+    def mock_tmpdir_contextmanager():
+        class MockContextManager:
             def __enter__(self):
                 return str(tmp_path)
 
             def __exit__(self, *args):
                 pass
 
-        return TmpDirCtx()
+        return MockContextManager()
 
-    mocker.patch("oko.api.dataset_sync.tempfile.TemporaryDirectory", mock_tmpdir)
+    mocker.patch("oko.api.dataset_sync.tempfile.TemporaryDirectory", mock_tmpdir_contextmanager)
+    mocker.patch("oko.api.dataset_sync.subprocess.run", side_effect=mock_run)
 
     _run(_sync(settings))  # must not raise
 
-    assert settings.sqlite_path.read_bytes() == b"sqlite-bytes"
+    assert not settings.sqlite_path.exists()
     assert not settings.export_path.exists()
 
 
@@ -111,26 +105,28 @@ def test_sync_resets_cached_query_connection_after_sqlite_replace(
     settings = _settings(tmp_path)
     init_db(settings.sqlite_path)
     _get_query_connection(settings.sqlite_path)
-    repo_path = tmp_path / "repo"
 
-    def mock_run(*args, **kwargs):
-        repo_path.mkdir(exist_ok=True)
-        (repo_path / "oko.sqlite3").write_bytes(b"new-sqlite-bytes")
-        return mock.MagicMock(returncode=0)
+    # Create mock repo with new sqlite content
+    repo_root = tmp_path / "mock_repo"
+    repo_root.mkdir()
+    (repo_root / "dataset").mkdir()
+    (repo_root / "dataset" / "oko.sqlite3").write_bytes(b"new-sqlite-bytes")
 
-    mocker.patch("subprocess.run", side_effect=mock_run)
-
-    def mock_tmpdir():
-        class TmpDirCtx:
+    def mock_tmpdir_contextmanager():
+        class MockContextManager:
             def __enter__(self):
-                return str(tmp_path)
+                return str(repo_root)
 
             def __exit__(self, *args):
                 pass
 
-        return TmpDirCtx()
+        return MockContextManager()
 
-    mocker.patch("oko.api.dataset_sync.tempfile.TemporaryDirectory", mock_tmpdir)
+    def mock_run(*args, **kwargs):
+        return mock.MagicMock(returncode=0)
+
+    mocker.patch("oko.api.dataset_sync.tempfile.TemporaryDirectory", mock_tmpdir_contextmanager)
+    mocker.patch("oko.api.dataset_sync.subprocess.run", side_effect=mock_run)
 
     try:
         _run(_sync(settings))
