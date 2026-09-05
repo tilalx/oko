@@ -64,29 +64,27 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH"
 WORKDIR /app
 
-RUN groupadd --system oko && useradd --system --gid oko --home-dir /app oko
+RUN groupadd --system oko && useradd --system --gid oko --home-dir /app oko && \
+    mkdir -p /app/data /output && chown -R oko:oko /app /output
 
-COPY pyproject.toml uv.lock* ./
-RUN --mount=type=cache,target=/root/.cache/uv \
+COPY --chown=oko:oko pyproject.toml uv.lock* ./
+USER oko
+RUN --mount=type=cache,target=/home/oko/.cache/uv \
     uv sync --frozen --no-install-project --no-dev --extra api || \
     uv sync --no-install-project --no-dev --extra api
-COPY README.md ./
-COPY src ./src
+COPY --chown=oko:oko README.md ./
+COPY --chown=oko:oko src ./src
 # Overwrites the checked-in zones.geojson's sibling files (index.html,
 # hashed assets/*) with the freshly built web UI -- zones.geojson itself
 # isn't produced by the frontend build, so it's untouched.
-COPY --from=frontend-builder /fe/dist ./src/oko/api/static
+COPY --chown=oko:oko --from=frontend-builder /fe/dist ./src/oko/api/static
 # --reinstall-package oko: the non-editable wheel build for the local
 # project must never be served from a stale uv build-cache entry keyed
 # loosely enough to survive a source change at the same version number
 # (observed once in development) -- everything else stays cached.
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/home/oko/.cache/uv \
     uv sync --frozen --no-dev --no-editable --extra api --reinstall-package oko || \
     uv sync --no-dev --no-editable --extra api --reinstall-package oko
-
-RUN mkdir -p /app/data /output && chown -R oko:oko /app /output
-
-USER oko
 
 ENTRYPOINT ["python", "-m"]
 CMD ["oko.pipeline", "--export", "/output/forecast_de.json"]
