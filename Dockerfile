@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---- frontend-builder: Svelte web UI, built independently of the Python
 # chain above (different toolchain entirely) -- see frontend/README or
 # `oko.api.app`'s STATIC_DIR for where the output ends up.
-FROM node:22-slim AS frontend-builder
+FROM node:26-slim AS frontend-builder
 WORKDIR /fe
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
