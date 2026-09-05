@@ -18,7 +18,7 @@ repos:
           - httpx
           - structlog
           - fastapi>=0.141.1
-          - limits>=3.0
+          - limits>=5.8.0
         args: [--strict]
         files: ^src/
 
