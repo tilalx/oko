@@ -114,9 +114,11 @@ pipeline {
                       git config --global credential.helper store
                       echo "https://${GITHUB_CREDENTIALS}@github.com" > ~/.git-credentials
                       chmod 600 ~/.git-credentials
-                      git lfs install
 
                       git clone --depth 1 https://github.com/tilalx/oko-dataset.git oko-dataset
+                      cd oko-dataset
+                      git lfs install --local
+                      cd ..
                       chmod 777 oko-dataset
                       touch oko-dataset/oko.sqlite3
                       chmod 666 oko-dataset/oko.sqlite3
