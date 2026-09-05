@@ -56,12 +56,24 @@ export function t(key: string, params?: Record<string, any>): string {
   return interpolate(value, params)
 }
 
+/** Constructing an `Intl.NumberFormat` is far more expensive than using
+ * one, and the map's tooltips/panels format numbers with a handful of
+ * fixed option sets over and over -- keep one instance per (locale,
+ * options) pair. */
+const numberFormats = new Map<string, Intl.NumberFormat>()
+
 export function formatNumber(
   value: number,
   options?: Intl.NumberFormatOptions & { locale?: string }
 ): string {
   const { locale = detectLocale(), ...opts } = options || {}
-  return new Intl.NumberFormat(locale, opts).format(value)
+  const key = `${locale}|${JSON.stringify(opts)}`
+  let format = numberFormats.get(key)
+  if (!format) {
+    format = new Intl.NumberFormat(locale, opts)
+    numberFormats.set(key, format)
+  }
+  return format.format(value)
 }
 
 export { detectLocale as getLocale, detectTimeZone as getTimeZone }

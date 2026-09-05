@@ -5,7 +5,7 @@
   import { colorForIntensity, rgbForIntensity } from '$lib/color'
   import { CATEGORY_META, NO_DATA_COLOR } from '$lib/constants'
   import { t, formatNumber } from '$lib/i18n'
-  import { computeZoneGeometry, flowBearingDegrees, makeBorderPointFinder, type BorderSegment } from '$lib/geo'
+  import { computeZoneGeometry, flowBearingDegrees, makeBorderPointFinder } from '$lib/geo'
   import { getZonesGeoJson, getWorldCountriesGeoJson, type ExchangeEdge } from '$lib/api'
   import { formatFullDateTime } from '$lib/format'
 
@@ -26,8 +26,24 @@
   let map: L.Map
   let zoneLayers: Record<string, L.Path[]> = {}
   let previousSelectedZone: string | null = null
-  let flowLineLayers: { marker: L.Marker; edge: ExchangeEdge; exporterZone: string; importerZone: string }[] = []
+  /** `color` is the CSS variable value currently written onto the marker's
+   * element -- see restyleFlowLines. `count`/`bearing` are kept so a zoom
+   * can rebuild the icon at a new scale without redoing placement. */
+  let flowLineLayers: {
+    marker: L.Marker
+    exporterZone: string
+    count: number
+    bearing: number
+    color: string | null
+  }[] = []
   let getBorderPoint: ReturnType<typeof makeBorderPointFinder> = () => null
+
+  //: The rest-of-world backdrop is ~450 static paths (~32k vertices) that
+  //: are never restyled, but as SVG they'd be that many DOM nodes for the
+  //: browser to re-project on every zoom and hit-test on every mousemove.
+  //: One canvas per map holds them all; the 144 data-zone paths stay on
+  //: SVG, where per-path setStyle and focus handling are cheaper.
+  let worldRenderer: L.Canvas
 
   //: Draw in the map's initial setView zoom -- see flowIconZoomScale below.
   const FLOW_ICON_BASE_ZOOM = 4
@@ -49,7 +65,7 @@
    * fallback already handles that case). Rendered dim and non-selectable
    * regardless of horizonTime/selection. */
   function hasData(zone: string): boolean {
-    return oko.allZones.includes(zone)
+    return oko.allZonesSet.has(zone)
   }
 
   function zoneStyle(zone: string): L.PathOptions {
@@ -89,11 +105,27 @@
     )
   }
 
+  /** Re-runs a layer's bound tooltip *content function* if -- and only if
+   * -- that tooltip is currently open. Leaflet evaluates function content
+   * when a tooltip opens and (even when `sticky`) never again while it
+   * stays open, so scrubbing the timeline under a held-open tooltip would
+   * otherwise leave it showing the value from whenever it was opened.
+   * `update()` no-ops on a tooltip that isn't on the map, so this costs
+   * nothing for the layers nobody is hovering. */
+  function refreshOpenTooltip(layer: L.Layer) {
+    layer.getTooltip()?.update()
+  }
+
+  //: Tooltip content is bound as a *function* (see init), so it's built
+  //: only for a tooltip that's actually open -- a repaint touches fills,
+  //: not the 144 tooltips of which at most one is on screen. The style is
+  //: computed once per zone and shared by that zone's world copies.
   function repaintMap() {
     for (const zone in zoneLayers) {
+      const style = zoneStyle(zone)
       for (const layer of zoneLayers[zone]) {
-        layer.setStyle(zoneStyle(zone))
-        layer.setTooltipContent(zoneTooltip(zone))
+        layer.setStyle(style)
+        refreshOpenTooltip(layer)
       }
     }
   }
@@ -114,9 +146,7 @@
   const FLOW_ICON_MIN_HIT = 26
 
   /** The chevron icon's own visual size and its (possibly larger, per
-   * FLOW_ICON_MIN_HIT) hoverable/collision box -- shared between the icon
-   * builder and the placement pass below so both agree on how much space
-   * an icon actually occupies. */
+   * FLOW_ICON_MIN_HIT) hoverable box. */
   function chevronIconBox(count: number, zoomScale: number): { width: number; height: number; hitW: number; hitH: number } {
     const unscaledHeight = 8 + (count - 1) * CHEVRON_STEP
     const width = 16 * zoomScale
@@ -124,7 +154,13 @@
     return { width, height, hitW: Math.max(FLOW_ICON_MIN_HIT, width), hitH: Math.max(FLOW_ICON_MIN_HIT, height) }
   }
 
-  function buildChevronIcon(count: number, bearingDeg: number, zoomScale: number, color: string): L.DivIcon {
+  /** The arrow's carbon-intensity color is *not* baked into the markup --
+   * it's the only part that changes as the timeline is scrubbed, and it
+   * rides a CSS variable so a repaint can rewrite it on the existing
+   * element (see restyleFlowLines) instead of rebuilding the icon. That
+   * also lets the chevron pulse animation run continuously rather than
+   * restarting every frame. */
+  function buildChevronIcon(count: number, bearingDeg: number, zoomScale: number): L.DivIcon {
     const unscaledHeight = 8 + (count - 1) * CHEVRON_STEP
     const { width, height, hitW, hitH } = chevronIconBox(count, zoomScale)
     // Outline pass stays static (it's just contrast backing so the arrow
@@ -149,7 +185,7 @@
       html: `<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%">
         <svg width="${width}" height="${height}" viewBox="0 0 16 ${unscaledHeight}" style="transform:rotate(${bearingDeg}deg)" fill="none" stroke-linecap="round" stroke-linejoin="round">
           <g stroke="#0c0d0c" stroke-width="3.15" stroke-opacity="0.5">${outline}</g>
-          <g stroke="${color}" stroke-width="1.65">${highlighted}</g>
+          <g stroke="var(--oko-flow-color)" stroke-width="1.65">${highlighted}</g>
         </svg>
       </div>`,
       iconSize: [hitW, hitH],
@@ -183,62 +219,35 @@
     flowLineLayers = []
   }
 
-  interface FlowCandidate {
-    edge: ExchangeEdge
-    exporterZone: string
-    importerZone: string
-    bearing: number
-    count: number
-    color: string
-    box: { hitW: number; hitH: number }
-    segment: BorderSegment
-  }
-
-  /** A point `t` of the way along a border segment -- t=0 is the segment's
-   * midpoint (very close to, but not always exactly, its `anchor`), t=+-1
-   * its two extremes. Lets an icon slide along the *real* border line
-   * instead of drifting perpendicular off it when avoiding a collision. */
-  function pointAlongSegment(segment: BorderSegment, t: number): [number, number] {
-    const u = (t + 1) / 2
-    return [
-      segment.start[0] + (segment.end[0] - segment.start[0]) * u,
-      segment.start[1] + (segment.end[1] - segment.start[1]) * u,
-    ]
-  }
-
-  //: Offsets (as fractions of the start<->end segment) tried in order when
-  //: an icon's ideal position collides with an already-placed one --
-  //: nearest to the anchor first, walking outward, alternating sides.
-  const SEGMENT_SLIDE_STEPS = [0, 0.3, -0.3, 0.6, -0.6, 1, -1]
-
-  function rectsOverlap(
-    ax: number,
-    ay: number,
-    aw: number,
-    ah: number,
-    bx: number,
-    by: number,
-    bw: number,
-    bh: number
-  ): boolean {
-    return Math.abs(ax - bx) * 2 < aw + bw && Math.abs(ay - by) * 2 < ah + bh
-  }
-
-  function drawFlowLines() {
+  /** Places one marker per border crossing, at that crossing's own border
+   * anchor -- and nowhere else. An arrow is a fact about a border, so it
+   * belongs on that border at every zoom; it never slides sideways to make
+   * room for a neighbor.
+   *
+   * (An earlier version resolved overlaps by displacing icons in pixel
+   * space. Any such displacement has to be converted back into a lat/lng
+   * to be drawn, which bakes a pixel distance measured at one zoom into
+   * the geography -- so the arrow both sat off its border and appeared to
+   * wander as the view changed. Crowding is now handled purely by the icon
+   * size shrinking as you zoom out; see resizeFlowIcons.)
+   *
+   * Nothing here depends on the scrub position or on the current view: an
+   * `ExchangeEdge` is a single latest-snapshot reading, so magnitude and
+   * direction are fixed. Runs only on new exchange data and on the
+   * visibility toggle. */
+  function layoutFlowLines() {
     clearFlowLines()
     if (!oko.flowLinesVisible || !map) return
     const maxMagnitude = oko.exchangesData.reduce((max, e) => Math.max(max, Math.abs(e.net_flow_mw)), 0) || 1
     const zoomScale = flowIconZoomScale()
 
-    const candidates: FlowCandidate[] = []
     for (const edge of oko.exchangesData) {
       const from = oko.zoneCentroids[edge.zone_from]
       const to = oko.zoneCentroids[edge.zone_to]
-      const segment = getBorderPoint(edge.zone_from, edge.zone_to)
-      if (!from || !to || !segment || edge.net_flow_mw === 0) continue
+      const anchor = getBorderPoint(edge.zone_from, edge.zone_to)
+      if (!from || !to || !anchor || edge.net_flow_mw === 0) continue
 
-      const magnitude = Math.abs(edge.net_flow_mw)
-      const scale = magnitude / maxMagnitude
+      const scale = Math.abs(edge.net_flow_mw) / maxMagnitude
       const forward = edge.net_flow_mw > 0
       const exporter = forward ? from : to
       const importer = forward ? to : from
@@ -246,93 +255,55 @@
       const importerZone = forward ? edge.zone_to : edge.zone_from
       const bearing = flowBearingDegrees(exporter, importer)
       const count = 1 + Math.round(scale * 2)
-      const exportValue = oko.zoneValueAtTime(exporterZone, oko.horizonTime)
-      const color = colorForIntensity(exportValue, oko.activeIntensityStops)
-
-      candidates.push({
-        edge,
-        exporterZone,
-        importerZone,
-        bearing,
-        count,
-        color,
-        box: chevronIconBox(count, zoomScale),
-        segment,
-      })
-    }
-
-    // Bigger flows claim their ideal (anchor) position first; smaller ones
-    // flex out of the way along their own border when that collides with
-    // an already-placed icon. Tie-broken by zone-pair key for determinism.
-    candidates.sort((a, b) => {
-      const magnitudeDiff = Math.abs(b.edge.net_flow_mw) - Math.abs(a.edge.net_flow_mw)
-      if (magnitudeDiff !== 0) return magnitudeDiff
-      const keyA = [a.edge.zone_from, a.edge.zone_to].sort().join('|')
-      const keyB = [b.edge.zone_from, b.edge.zone_to].sort().join('|')
-      return keyA.localeCompare(keyB)
-    })
-
-    const placedRects: { x: number; y: number; w: number; h: number }[] = []
-    const isClear = (px: L.Point, w: number, h: number) =>
-      !placedRects.some((rect) => rectsOverlap(px.x, px.y, w, h, rect.x, rect.y, rect.w, rect.h))
-
-    for (const candidate of candidates) {
-      const { hitW, hitH } = candidate.box
-      let resolved: [number, number] | null = null
-      let resolvedPx: L.Point | null = null
-
-      // First choice: slide along the *real* border this crossing sits on.
-      for (const t of SEGMENT_SLIDE_STEPS) {
-        const point = t === 0 ? candidate.segment.anchor : pointAlongSegment(candidate.segment, t)
-        const px = map.latLngToContainerPoint(point)
-        if (isClear(px, hitW, hitH)) {
-          resolved = point
-          resolvedPx = px
-          break
-        }
-      }
-
-      // The segment is too short to give any clearance (common at
-      // tripoints, where 3+ zones' borders meet almost at a single spot)
-      // -- nudge perpendicular to the flow direction instead, still
-      // anchored at the crossing, just offset to the side, with growing
-      // distance until something clears.
-      if (!resolved) {
-        const anchorPx = map.latLngToContainerPoint(candidate.segment.anchor)
-        const bearingRad = (candidate.bearing * Math.PI) / 180
-        const dir = { x: Math.cos(bearingRad), y: Math.sin(bearingRad) }
-        for (const steps of [1, -1, 2, -2, 3, -3]) {
-          const dist = steps * hitH * 0.7
-          const px = L.point(anchorPx.x + dir.x * dist, anchorPx.y + dir.y * dist)
-          if (isClear(px, hitW, hitH)) {
-            const latlng = map.containerPointToLatLng(px)
-            resolved = [latlng.lat, latlng.lng]
-            resolvedPx = px
-            break
-          }
-        }
-      }
-
-      // Genuinely nothing clears (a very crowded cluster) -- render at the
-      // anchor anyway; a rare, minor overlap beats silently dropping a
-      // real border crossing.
-      if (!resolved || !resolvedPx) {
-        resolved = candidate.segment.anchor
-        resolvedPx = map.latLngToContainerPoint(resolved)
-      }
-      placedRects.push({ x: resolvedPx.x, y: resolvedPx.y, w: hitW, h: hitH })
+      const [lat, lng] = anchor
 
       for (const offset of WORLD_COPY_OFFSETS) {
-        const marker = L.marker([resolved[0], resolved[1] + offset], {
-          icon: buildChevronIcon(candidate.count, candidate.bearing, zoomScale, candidate.color),
+        const marker = L.marker([lat, lng + offset], {
+          icon: buildChevronIcon(count, bearing, zoomScale),
         })
-          .bindTooltip(flowTooltip(candidate.edge, candidate.exporterZone, candidate.importerZone), {
+          // Built on hover, not now -- the tooltip quotes the exporting
+          // zone's intensity at the *current* scrub position, and this
+          // marker now outlives many scrub positions.
+          .bindTooltip(() => flowTooltip(edge, exporterZone, importerZone), {
             sticky: true,
             className: 'flow-tooltip',
           })
           .addTo(map)
-        flowLineLayers.push({ marker, edge: candidate.edge, exporterZone: candidate.exporterZone, importerZone: candidate.importerZone })
+        flowLineLayers.push({ marker, exporterZone, count, bearing, color: null })
       }
+    }
+
+    restyleFlowLines()
+  }
+
+  /** Zoom scales the chevrons but must not move them: rebuild each icon at
+   * the new scale in place, leaving the marker's position alone. setIcon
+   * replaces the element, so the color variable has to be re-applied --
+   * clearing `color` makes restyleFlowLines do exactly that. */
+  function resizeFlowIcons() {
+    const zoomScale = flowIconZoomScale()
+    for (const entry of flowLineLayers) {
+      entry.marker.setIcon(buildChevronIcon(entry.count, entry.bearing, zoomScale))
+      entry.color = null
+    }
+    restyleFlowLines()
+  }
+
+  /** The scrub-time half of the flow arrows: rewrite each marker's color
+   * variable in place, skipping the ones whose color didn't change. */
+  function restyleFlowLines() {
+    for (const entry of flowLineLayers) {
+      const color = colorForIntensity(
+        oko.zoneValueAtTime(entry.exporterZone, oko.horizonTime),
+        oko.activeIntensityStops
+      )
+      refreshOpenTooltip(entry.marker)
+      if (color === entry.color) continue
+      const el = entry.marker.getElement()
+      // Not in the DOM yet -- leave `color` unset so the next repaint retries.
+      if (!el) continue
+      el.style.setProperty('--oko-flow-color', color)
+      entry.color = color
     }
   }
 
@@ -393,7 +364,10 @@
       minZoom: MIN_ZOOM,
       maxZoom: MAX_ZOOM,
     }).setView([52, 12], 4)
-    map.on('zoomend', drawFlowLines)
+    // Placement is view-independent (see layoutPoint), so zoom only needs
+    // to rescale the icons -- and pan needs nothing at all.
+    map.on('zoomend', resizeFlowIcons)
+    worldRenderer = L.canvas({ padding: 0.5 })
 
     const [geojson, worldGeojson] = await Promise.all([getZonesGeoJson(), getWorldCountriesGeoJson()])
 
@@ -403,13 +377,13 @@
       features: worldGeojson.features.filter((f: any) => !covered.has(f.properties.iso2)),
     }
 
-    const { centroids, boundaryPoints } = computeZoneGeometry(geojson)
+    const { centroids, boundaries } = computeZoneGeometry(geojson)
     oko.zoneCentroids = centroids
-    oko.zoneBoundaryPoints = boundaryPoints
-    getBorderPoint = makeBorderPointFinder(boundaryPoints)
+    getBorderPoint = makeBorderPointFinder(boundaries)
 
     for (const offset of WORLD_COPY_OFFSETS) {
       L.geoJSON(shiftGeoJsonLng(restOfWorld, offset), {
+        renderer: worldRenderer,
         style: () => restOfWorldStyle,
         onEachFeature: (feature, layer) => {
           layer.bindTooltip(`<b>${feature.properties.name}</b><br>${t('mapView.noData')}`, {
@@ -424,22 +398,30 @@
         onEachFeature: (feature, layer) => {
           const zone = feature.properties.zone
           ;(zoneLayers[zone] ??= []).push(layer as L.Path)
-          layer.bindTooltip(zoneTooltip(zone), { sticky: true, className: 'zone-tooltip' })
-          if (hasData(zone)) layer.on('click', () => onZoneClick(zone))
+          // Bound as a function so it's rebuilt on open, reflecting the
+          // scrub position at hover time -- a repaint never has to walk
+          // every layer writing tooltip HTML nobody is looking at.
+          layer.bindTooltip(() => zoneTooltip(zone), { sticky: true, className: 'zone-tooltip' })
+          // Gate inside the handler, not around the binding: init() runs
+          // concurrently with the /zones fetch (see App.svelte), so
+          // `allZones` is still empty here and testing hasData() now would
+          // leave every zone permanently unclickable. At click time it's
+          // populated.
+          layer.on('click', () => {
+            if (hasData(zone)) onZoneClick(zone)
+          })
         },
       }).addTo(map)
     }
 
-    drawFlowLines()
+    layoutFlowLines()
   }
 
-  // Dragging the Timebar slider fires many horizonTime updates per second
-  // -- each one triggers a full repaint of every zone plus every flow
-  // arrow, which is far more work than a single frame budget allows if run
-  // synchronously per update. Coalesce to at most one repaint per animation
-  // frame; repaintMap/drawFlowLines always read the *current* oko state
-  // when they finally run, so no intermediate scrub position is lost --
-  // only the redundant in-between repaints are skipped.
+  // Dragging the Timebar slider fires many horizonTime updates per second.
+  // Coalesce to at most one repaint per animation frame; repaintMap and
+  // restyleFlowLines always read the *current* oko state when they finally
+  // run, so no intermediate scrub position is lost -- only the redundant
+  // in-between repaints are skipped.
   let repaintScheduled = false
   function scheduleRepaint() {
     if (repaintScheduled) return
@@ -447,19 +429,18 @@
     requestAnimationFrame(() => {
       repaintScheduled = false
       repaintMap()
-      drawFlowLines()
+      restyleFlowLines()
     })
   }
 
   $effect(() => {
-    // Re-render on any input that changes a zone's fill/tooltip or a flow
-    // arrow's color/tooltip (both keyed off the exporting zone's own
-    // carbon intensity) -- horizonTime, colorblindPalette (via
-    // activeIntensityStops), exchangesData, and allZones arriving (which
-    // decides which zones are grayed-out/non-interactive).
+    // Re-color on any input that changes a zone's fill or a flow arrow's
+    // color (both keyed off a zone's own carbon intensity) -- horizonTime,
+    // colorblindPalette (via activeIntensityStops), and allZones arriving
+    // (which decides which zones are grayed-out/non-interactive). Arrow
+    // *placement* doesn't depend on any of these; see layoutFlowLines.
     void oko.horizonTime
     void oko.activeIntensityStops
-    void oko.exchangesData
     void oko.allZones
     scheduleRepaint()
   })
@@ -468,26 +449,22 @@
     // Selecting a zone only changes the border weight/color of the
     // previously- and newly-selected zone -- not every zone's fill, and
     // not the flow arrows (which don't depend on selection at all). Restyle
-    // just those (at most two) layers instead of the full repaintMap().
+    // just those (at most two) zones instead of the full repaintMap().
     const zone = oko.selectedZone
     const previous = previousSelectedZone
     if (previous) {
-      for (const layer of zoneLayers[previous] || []) {
-        layer.setStyle(zoneStyle(previous))
-        layer.setTooltipContent(zoneTooltip(previous))
-      }
+      const style = zoneStyle(previous)
+      for (const layer of zoneLayers[previous] || []) layer.setStyle(style)
     }
-    for (const layer of zoneLayers[zone] || []) {
-      layer.setStyle(zoneStyle(zone))
-      layer.setTooltipContent(zoneTooltip(zone))
-    }
+    const style = zoneStyle(zone)
+    for (const layer of zoneLayers[zone] || []) layer.setStyle(style)
     previousSelectedZone = zone
   })
 
   $effect(() => {
     void oko.flowLinesVisible
     void oko.exchangesData
-    drawFlowLines()
+    layoutFlowLines()
   })
 </script>
 
@@ -561,6 +538,9 @@
     outline: none;
   }
   :global(.flow-arrow-icon) {
+    /* Overwritten per marker by restyleFlowLines; this is only the value
+       used between the element entering the DOM and its first restyle. */
+    --oko-flow-color: var(--foreground);
     color: var(--foreground);
     filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
     cursor: pointer;

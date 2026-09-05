@@ -23,6 +23,7 @@
     "zoom-out": '<path d="M5 12h14"/>',
     back: '<path d="m15 5-7 7 7 7"/>',
     close: '<path d="M6 6l12 12M18 6 6 18"/>',
+    menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
     "chevron-left": '<path d="m14 6-6 6 6 6"/>',
     "chevron-right": '<path d="m10 6 6 6-6 6"/>',
     flow: '<path d="M3 8h13"/><path d="m13 4 4 4-4 4"/><path d="M21 16H8"/><path d="m11 20-4-4 4-4"/>',

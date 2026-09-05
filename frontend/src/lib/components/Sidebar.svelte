@@ -1,23 +1,59 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import { oko } from '$lib/state.svelte'
   import { t } from '$lib/i18n'
   import { Collapsible } from '$lib/components/ui/collapsible'
   import Icon from './Icon.svelte'
 
   let resourcesOpen = $state(false)
+
+  /** Phone-sized viewport: the sidebar is a full off-canvas drawer over the
+   * map rather than a column beside it, so "collapsed" means hidden, not
+   * narrowed -- and its content stays mounted while it slides out. */
+  let narrow = $state(false)
+  onMount(() => {
+    const mq = window.matchMedia('(max-width: 639px)')
+    const sync = () => (narrow = mq.matches)
+    sync()
+    mq.addEventListener('change', sync)
+    return () => mq.removeEventListener('change', sync)
+  })
+
+  const showContent = $derived(narrow || !oko.sidebarCollapsed)
 </script>
 
+{#if narrow && oko.sidebarCollapsed}
+  <button
+    class="fixed top-2 left-2 z-[800] flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-[var(--card-translucent)] text-foreground backdrop-blur-md"
+    aria-label={t('sidebar.openLabel')}
+    onclick={() => oko.setSidebarCollapsed(false)}
+  >
+    <Icon name="menu" size="1.1em" />
+  </button>
+{/if}
+
+{#if narrow && !oko.sidebarCollapsed}
+  <button
+    class="fixed inset-0 z-[850] bg-black/50"
+    aria-label={t('sidebar.collapseLabel')}
+    onclick={() => oko.setSidebarCollapsed(true)}
+  ></button>
+{/if}
+
+<!-- Off-canvas but still in the DOM on phones (so it can slide) -- inert
+     keeps it out of the tab order and the accessibility tree while hidden. -->
 <aside
-  class="flex flex-col gap-[0.15rem] overflow-y-auto border-r border-border bg-[var(--sidebar-bg)] py-4 transition-[flex-basis,width] duration-[180ms] ease-in-out {oko.sidebarCollapsed
-    ? 'basis-[60px] w-[60px] px-[0.6rem]'
-    : 'basis-[220px] w-[220px] px-[0.85rem]'}"
+  inert={narrow && oko.sidebarCollapsed}
+  class="fixed inset-y-0 left-0 z-[900] flex w-[240px] flex-col gap-[0.15rem] overflow-y-auto border-r border-border bg-[var(--sidebar-bg)] px-[0.85rem] py-4 transition-transform duration-[180ms] ease-in-out sm:static sm:z-auto sm:translate-x-0 sm:transition-[flex-basis,width] {oko.sidebarCollapsed
+    ? '-translate-x-full sm:basis-[60px] sm:w-[60px] sm:px-[0.6rem]'
+    : 'translate-x-0 sm:basis-[220px] sm:w-[220px] sm:px-[0.85rem]'}"
 >
   <div class="mb-[0.3rem] flex items-center gap-[0.55rem] overflow-hidden px-2 pt-[0.4rem] pb-4 whitespace-nowrap">
     <span class="inline-block h-[0.55rem] w-[0.55rem] flex-none rounded-full bg-[var(--accent-color)]"></span>
-    {#if !oko.sidebarCollapsed}<span class="oko-num text-[1.05rem] font-semibold tracking-[0.02em]">OKO</span>{/if}
+    {#if showContent}<span class="oko-num text-[1.05rem] font-semibold tracking-[0.02em]">OKO</span>{/if}
   </div>
 
-  {#if !oko.sidebarCollapsed}
+  {#if showContent}
     <nav class="flex flex-col gap-[0.15rem]">
       <a
         class="flex items-center gap-[0.65rem] rounded-md px-[0.6rem] py-2 text-[0.87rem] {oko.route === 'docs'
@@ -123,6 +159,6 @@
     aria-label={t('sidebar.collapseLabel')}
     onclick={() => oko.setSidebarCollapsed(!oko.sidebarCollapsed)}
   >
-    <Icon name={oko.sidebarCollapsed ? 'chevron-right' : 'chevron-left'} size="1em" />
+    <Icon name={narrow ? 'close' : oko.sidebarCollapsed ? 'chevron-right' : 'chevron-left'} size="1em" />
   </button>
 </aside>

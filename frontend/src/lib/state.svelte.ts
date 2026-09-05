@@ -9,17 +9,37 @@ import {
 import { detectLocale, detectTimeZone, detectHourCycle } from './i18n'
 
 const HOUR_MS = 3_600_000
-/** How far a point's timestamp may sit from a queried time and still count
- * as "at" it -- half the hourly data resolution, so a scrub position never
- * silently borrows a neighboring hour's value. */
-const POINT_MATCH_TOLERANCE_MS = 30 * 60 * 1000
 
-function loadBool(key: string): boolean {
+/** Data is hourly-resolution, so a point and a queried time "match" when
+ * they round to the same hour -- equivalent to the +-30min tolerance a
+ * nearest-point scan would apply, but resolvable with a single map lookup.
+ * See `pointIndex`. */
+function hourKey(timeMs: number): number {
+  return Math.round(timeMs / HOUR_MS) * HOUR_MS
+}
+
+interface PointIndex {
+  /** Identities of the arrays the index was built from -- rebuilt when
+   * either is replaced (see App.svelte's per-zone assignments). */
+  history: unknown
+  forecast: unknown
+  byHour: Map<number, HistoryPoint | ForecastPoint>
+}
+
+function loadBool(key: string, fallback = false): boolean {
   try {
-    return localStorage.getItem(key) === '1'
+    const stored = localStorage.getItem(key)
+    return stored === null ? fallback : stored === '1'
   } catch {
-    return false
+    return fallback
   }
+}
+
+/** Phone-sized viewport -- where the sidebar is an off-canvas drawer over
+ * the map instead of a column beside it. Read once at startup for the
+ * initial collapsed default; the layout itself is CSS-driven. */
+function isNarrowViewport(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 639px)').matches
 }
 
 function saveBool(key: string, value: boolean) {
@@ -43,7 +63,6 @@ class OkoState {
   zoneHistory = $state<Record<string, HistoryPoint[]>>({})
   zoneCurrent = $state<Record<string, CurrentBreakdown | null>>({})
   zoneCentroids = $state<Record<string, [number, number]>>({})
-  zoneBoundaryPoints = $state<Record<string, [number, number][]>>({})
   exchangesData = $state<ExchangeEdge[]>([])
 
   flowLinesVisible = $state(false)
@@ -70,6 +89,10 @@ class OkoState {
   windowEndMs = $derived(this.nowHourMs + WINDOW_HOURS[this.windowGranularity].after * HOUR_MS)
 
   allZones = $state<string[]>([])
+  /** Membership set for `allZones` -- the map hit-tests "does this zone
+   * have data at all?" once per rendered zone layer per repaint, which an
+   * array scan makes O(zones) instead of O(1). */
+  allZonesSet = $derived(new Set(this.allZones))
   /** Latest observed CurrentBreakdown for the selected zone. */
   lastCurrent = $state<CurrentBreakdown | null>(null)
 
@@ -78,7 +101,9 @@ class OkoState {
 
   colorblindPalette = $state(loadBool('oko-colorblind'))
   use24h = $state(loadBool('oko-24h') ?? detectHourCycle())
-  sidebarCollapsed = $state(loadBool('oko-sidebar-collapsed'))
+  /** Collapsed to a rail on desktop, fully off-canvas on phones -- so it
+   * defaults to collapsed there rather than covering the map on load. */
+  sidebarCollapsed = $state(loadBool('oko-sidebar-collapsed', isNarrowViewport()))
   promoDismissed = $state(loadBool('oko-promo-dismissed'))
   cardVisible = $state(true)
   locale = $state(detectLocale())
@@ -123,22 +148,44 @@ class OkoState {
     return point.value_lifecycle ?? point.value ?? null
   }
 
-  /** The unified point closest to `timeMs`, or `null` if the nearest one
-   * is more than half an hour away -- an absolute timestamp is meaningful
-   * identically for every zone, so (unlike an index) this needs no
-   * per-zone re-anchoring when the selected zone changes. */
-  pointAtTime(zone: string, timeMs: number): HistoryPoint | ForecastPoint | null {
-    const points = this.unifiedPoints(zone)
-    let best: HistoryPoint | ForecastPoint | null = null
-    let bestDiff = Infinity
-    for (const point of points) {
-      const diff = Math.abs(new Date(point.timestamp).getTime() - timeMs)
-      if (diff < bestDiff) {
-        best = point
-        bestDiff = diff
-      }
+  /** Per-zone hour -> point lookup, built on first use and rebuilt only
+   * when that zone's history/forecast array is replaced. Plain (not
+   * `$state`) -- it's a derived cache of data that is already reactive,
+   * and nothing should re-render because a lookup table got filled in.
+   *
+   * Parsing each point's ISO timestamp is the single most expensive thing
+   * `pointAtTime` used to do, and the map repaints every zone on every
+   * scrub frame -- doing it once per data load instead of once per lookup
+   * is what keeps a repaint inside a frame budget. */
+  private pointIndexes = new Map<string, PointIndex>()
+
+  private pointIndex(zone: string): Map<number, HistoryPoint | ForecastPoint> {
+    const history = this.zoneHistory[zone]
+    const forecast = this.zoneForecasts[zone]
+    const cached = this.pointIndexes.get(zone)
+    if (cached && cached.history === history && cached.forecast === forecast) return cached.byHour
+
+    const byHour = new Map<number, HistoryPoint | ForecastPoint>()
+    for (const point of [...(history || []), ...(forecast || [])]) {
+      const time = new Date(point.timestamp).getTime()
+      if (Number.isNaN(time)) continue
+      const key = hourKey(time)
+      // Two points landing in one hour bucket (sub-hourly or duplicated
+      // data): keep whichever sits closer to the hour itself.
+      const existing = byHour.get(key)
+      if (existing && Math.abs(new Date(existing.timestamp).getTime() - key) <= Math.abs(time - key)) continue
+      byHour.set(key, point)
     }
-    return bestDiff <= POINT_MATCH_TOLERANCE_MS ? best : null
+    this.pointIndexes.set(zone, { history, forecast, byHour })
+    return byHour
+  }
+
+  /** The unified point at `timeMs`'s hour, or `null` if the zone has none
+   * -- an absolute timestamp is meaningful identically for every zone, so
+   * (unlike an index) this needs no per-zone re-anchoring when the
+   * selected zone changes. */
+  pointAtTime(zone: string, timeMs: number): HistoryPoint | ForecastPoint | null {
+    return this.pointIndex(zone).get(hourKey(timeMs)) ?? null
   }
 
   zoneValueAtTime(zone: string, timeMs: number): number | null {

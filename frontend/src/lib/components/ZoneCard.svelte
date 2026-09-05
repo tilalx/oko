@@ -23,7 +23,12 @@
 </script>
 
 {#if oko.cardVisible}
-  <Card class="absolute top-[1.1rem] left-[1.1rem] z-[550] w-[380px] max-w-[calc(100%-2.2rem)] max-h-[calc(100%-7.8rem)]">
+  <!-- Phones: full-width panel below the menu button and top badge, capped
+       so the map stays visible above the Timebar. Desktop keeps the
+       floating top-left card. -->
+  <Card
+    class="absolute top-[3.4rem] right-[3.2rem] left-2 z-[550] max-h-[45dvh] sm:top-[1.1rem] sm:right-auto sm:left-[1.1rem] sm:w-[380px] sm:max-w-[calc(100%-2.2rem)] sm:max-h-[calc(100%-7.8rem)]"
+  >
     <div class="flex items-center gap-[0.6rem] px-4 pt-[0.9rem] pb-[0.7rem]">
       <button
         class="flex items-center justify-center rounded-md p-[0.3rem] text-muted-foreground hover:bg-white/6 hover:text-foreground"

@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------
 
 type Ring = [number, number][] // [lng, lat]
+export type LatLng = [number, number]
 
 function ringArea(ring: Ring): number {
   let sum = 0
@@ -49,31 +50,29 @@ function polygonCentroid(coordinates: any, type: string): [number, number] | nul
   return best
 }
 
-/** Every ring vertex (all rings, all parts of a MultiPolygon) as [lat, lng]
- * -- used to find the real border-crossing point between two zones, unlike
- * the single interior centroid above. */
-function extractBoundaryPoints(coordinates: any, type: string): [number, number][] {
+/** Every boundary ring (all rings, all parts of a MultiPolygon) as a closed
+ * [lat, lng] polyline. Kept as *rings* rather than a flat vertex cloud so
+ * the border finder below can walk a boundary in order -- a point averaged
+ * out of an unordered cloud can land anywhere, a point interpolated along a
+ * ring is always on the boundary. */
+function extractBoundaryRings(coordinates: any, type: string): LatLng[][] {
   const rings: Ring[] = type === 'MultiPolygon' ? coordinates.flatMap((polygon: Ring[]) => polygon) : coordinates
-  const points: [number, number][] = []
-  for (const ring of rings) {
-    for (const [lng, lat] of ring) points.push([lat, lng])
-  }
-  return points
+  return rings.map((ring) => ring.map(([lng, lat]) => [lat, lng] as LatLng))
 }
 
 export function computeZoneGeometry(geojson: any): {
-  centroids: Record<string, [number, number]>
-  boundaryPoints: Record<string, [number, number][]>
+  centroids: Record<string, LatLng>
+  boundaries: Record<string, LatLng[][]>
 } {
-  const centroids: Record<string, [number, number]> = {}
-  const boundaryPoints: Record<string, [number, number][]> = {}
+  const centroids: Record<string, LatLng> = {}
+  const boundaries: Record<string, LatLng[][]> = {}
   for (const feature of geojson.features) {
     const zone = feature.properties.zone
     const centroid = polygonCentroid(feature.geometry.coordinates, feature.geometry.type)
     if (centroid) centroids[zone] = [centroid[1], centroid[0]]
-    boundaryPoints[zone] = extractBoundaryPoints(feature.geometry.coordinates, feature.geometry.type)
+    boundaries[zone] = extractBoundaryRings(feature.geometry.coordinates, feature.geometry.type)
   }
-  return { centroids, boundaryPoints }
+  return { centroids, boundaries }
 }
 
 // ---------------------------------------------------------------------
@@ -88,109 +87,259 @@ export function flowBearingDegrees([lat1, lng1]: [number, number], [lat2, lng2]:
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360
 }
 
-/** Radius (degrees) around the actual closest-approach point within which
- * a vertex still counts as part of the same shared border run. A long
- * straight shared border only has vertices at its two corner ends (a
- * straight line needs no vertices in between) -- taking just the single
- * closest vertex pair always snaps the marker to whichever corner happens
- * to be nearest. Pulling in every vertex near that closest-approach point
- * picks up both ends of that long edge (plus any other nearby corners),
- * so averaging them lands the marker along the border, not pinned to one
- * corner.
- *
- * Anchored to the *location* of the closest approach, not just its
- * *distance* -- a zone with a complex, multi-part coastline (e.g. Norway's
- * or Sweden's fjord/archipelago boundaries) can have several separate
- * points that are each individually close to the other zone, at different
- * locations; including all of them (as a distance-only threshold would)
- * averages across disjoint border segments and can land the marker in open
- * water between them. */
-const BORDER_CLUSTER_RADIUS_DEGREES = 0.15
+/** How far (in degrees of latitude, ~17 km) a vertex of one zone may sit
+ * from the other zone's boundary and still count as lying *on* the shared
+ * border. Has to absorb the disagreement between two independently
+ * simplified polygons tracing the same real-world border, without pulling
+ * in a facing coastline across a strait. */
+const BORDER_TOLERANCE_DEGREES = 0.15
 
-/** Vertices of each zone's boundary that lie within
- * BORDER_CLUSTER_RADIUS_DEGREES of the true closest-approach point between
- * the two zones, averaged together -- the shared border "run", not just
- * the single nearest vertex pair and not any other coincidentally-close
- * vertex elsewhere on a complex coastline. O(|A|*|B|) vertices; called
- * once per pair and memoized by the caller (see makeBorderPointFinder) --
- * each zone has only tens to a few hundred vertices, so this is negligible
- * even across all borders. */
-/** A border crossing's anchor (for icon placement/priority) plus the two
- * extremes of the local shared-border run, as a straight-line
- * approximation an icon can slide along to avoid overlapping a
- * neighboring crossing's icon (see MapView's drawFlowLines) without
- * drifting off the actual border. */
-export interface BorderSegment {
-  anchor: [number, number]
-  start: [number, number]
-  end: [number, number]
+/** Grid cell size for the per-zone segment index. Must be >=
+ * BORDER_TOLERANCE_DEGREES so a proximity query only ever has to look at
+ * the cells immediately around the query point. */
+const GRID_CELL_DEGREES = 0.5
+
+type Segment = [LatLng, LatLng]
+
+/** Longitude degrees shrink toward the poles; comparing raw degrees would
+ * make the tolerance (and every length below) latitude-dependent. All
+ * distance math here works in this locally-equirectangular space instead:
+ * y = lat, x = lng * cos(lat). */
+function lngScaleAt(lat: number): number {
+  return Math.cos((lat * Math.PI) / 180)
 }
 
+function distSq(a: LatLng, b: LatLng, lngScale: number): number {
+  const dy = a[0] - b[0]
+  const dx = (a[1] - b[1]) * lngScale
+  return dy * dy + dx * dx
+}
+
+/** Squared distance from a point to a *segment* -- not to its endpoints. A
+ * long straight shared border carries no vertices between its two corners,
+ * so vertex-to-vertex proximity alone would call the middle of such a
+ * border "far away". */
+function distSqToSegment(p: LatLng, [a, b]: Segment, lngScale: number): number {
+  const py = p[0] - a[0]
+  const px = (p[1] - a[1]) * lngScale
+  const vy = b[0] - a[0]
+  const vx = (b[1] - a[1]) * lngScale
+  const lenSq = vx * vx + vy * vy
+  if (lenSq === 0) return py * py + px * px
+  const t = Math.max(0, Math.min(1, (px * vx + py * vy) / lenSq))
+  const dy = py - t * vy
+  const dx = px - t * vx
+  return dy * dy + dx * dx
+}
+
+/** A zone's boundary segments bucketed into a fixed lat/lng grid, so
+ * "is this point on that zone's boundary?" costs a handful of segment
+ * tests instead of a scan of the whole zone. Built once per zone, lazily,
+ * and shared by every border that zone takes part in. */
+type SegmentIndex = Map<string, Segment[]>
+
+function cellKey(latCell: number, lngCell: number): string {
+  return `${latCell}:${lngCell}`
+}
+
+function buildSegmentIndex(rings: LatLng[][]): SegmentIndex {
+  const index: SegmentIndex = new Map()
+  for (const ring of rings) {
+    for (let i = 0; i < ring.length - 1; i++) {
+      const segment: Segment = [ring[i], ring[i + 1]]
+      const latFrom = Math.floor(Math.min(segment[0][0], segment[1][0]) / GRID_CELL_DEGREES)
+      const latTo = Math.floor(Math.max(segment[0][0], segment[1][0]) / GRID_CELL_DEGREES)
+      const lngFrom = Math.floor(Math.min(segment[0][1], segment[1][1]) / GRID_CELL_DEGREES)
+      const lngTo = Math.floor(Math.max(segment[0][1], segment[1][1]) / GRID_CELL_DEGREES)
+      // Bounding-box cells, not an exact rasterization: a few extra
+      // candidates cost one distance test each, and every cell the segment
+      // truly crosses is covered.
+      for (let latCell = latFrom; latCell <= latTo; latCell++) {
+        for (let lngCell = lngFrom; lngCell <= lngTo; lngCell++) {
+          const key = cellKey(latCell, lngCell)
+          const bucket = index.get(key)
+          if (bucket) bucket.push(segment)
+          else index.set(key, [segment])
+        }
+      }
+    }
+  }
+  return index
+}
+
+/** Whether `p` lies within BORDER_TOLERANCE_DEGREES of the indexed
+ * boundary. The tolerance is a latitude distance; in longitude it spans
+ * more degrees the further from the equator, hence the widened cell
+ * range. */
+function nearBoundary(index: SegmentIndex, p: LatLng): boolean {
+  const lngScale = lngScaleAt(p[0])
+  const lngReach = BORDER_TOLERANCE_DEGREES / Math.max(lngScale, 0.01)
+  const latCell = Math.floor(p[0] / GRID_CELL_DEGREES)
+  const lngCell = Math.floor(p[1] / GRID_CELL_DEGREES)
+  const lngCells = Math.ceil(lngReach / GRID_CELL_DEGREES)
+  const toleranceSq = BORDER_TOLERANCE_DEGREES ** 2
+  for (let dLat = -1; dLat <= 1; dLat++) {
+    for (let dLng = -lngCells; dLng <= lngCells; dLng++) {
+      const bucket = index.get(cellKey(latCell + dLat, lngCell + dLng))
+      if (!bucket) continue
+      for (const segment of bucket) {
+        if (distSqToSegment(p, segment, lngScale) <= toleranceSq) return true
+      }
+    }
+  }
+  return false
+}
+
+/** The maximal runs of consecutive vertices of `rings` that lie on the
+ * indexed boundary -- i.e. the shared border(s), in boundary order. Rings
+ * are closed, so a run may wrap around the ring's start. */
+function sharedBorderRuns(rings: LatLng[][], index: SegmentIndex): LatLng[][] {
+  const runs: LatLng[][] = []
+  for (const ring of rings) {
+    const n = ring.length - 1 // last vertex repeats the first
+    if (n < 2) continue
+    const shared = Array.from({ length: n }, (_, i) => nearBoundary(index, ring[i]))
+    if (shared.every((s) => !s)) continue
+    // Start walking just after a gap so a run that straddles index 0 is
+    // collected as one run rather than two. (A ring entirely on the border
+    // -- an enclave -- has no gap; it is emitted whole below.)
+    let start = shared.findIndex((s) => !s)
+    if (start === -1) {
+      runs.push(ring.slice(0, n))
+      continue
+    }
+    let current: LatLng[] = []
+    for (let step = 0; step < n; step++) {
+      const i = (start + step) % n
+      if (shared[i]) current.push(ring[i])
+      else if (current.length) {
+        runs.push(current)
+        current = []
+      }
+    }
+    if (current.length) runs.push(current)
+  }
+  return runs
+}
+
+function polylineLength(points: LatLng[]): number {
+  let total = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    total += Math.sqrt(distSq(points[i], points[i + 1], lngScaleAt(points[i][0])))
+  }
+  return total
+}
+
+/** The point halfway along the polyline, by arc length -- interpolated on
+ * the line itself, so the result is always *on* the border rather than
+ * somewhere near it. */
+function midpointAlong(points: LatLng[]): LatLng {
+  const half = polylineLength(points) / 2
+  if (half === 0) return points[0]
+  let walked = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    const step = Math.sqrt(distSq(points[i], points[i + 1], lngScaleAt(points[i][0])))
+    if (walked + step >= half) {
+      const t = step === 0 ? 0 : (half - walked) / step
+      return [
+        points[i][0] + (points[i + 1][0] - points[i][0]) * t,
+        points[i][1] + (points[i + 1][1] - points[i][1]) * t,
+      ]
+    }
+    walked += step
+  }
+  return points[points.length - 1]
+}
+
+/** Closest approach between two boundaries, as the midpoint of the nearest
+ * vertex/segment pair. Used only for zone pairs that share no border at
+ * all -- subsea interconnectors (GB-NL, DK-SE, ...) -- where the honest
+ * anchor is the water between the two coasts. */
+function closestApproachMidpoint(ringsA: LatLng[][], ringsB: LatLng[][]): LatLng | null {
+  let best: LatLng | null = null
+  let bestDistSq = Infinity
+  for (const ring of ringsA) {
+    for (const a of ring) {
+      const lngScale = lngScaleAt(a[0])
+      for (const ringB of ringsB) {
+        for (let i = 0; i < ringB.length - 1; i++) {
+          const segment: Segment = [ringB[i], ringB[i + 1]]
+          const d = distSqToSegment(a, segment, lngScale)
+          if (d < bestDistSq) {
+            bestDistSq = d
+            // Project onto the segment so the midpoint spans the real gap,
+            // not the gap to whichever B vertex happened to be nearest.
+            const closest = closestPointOnSegment(a, segment, lngScale)
+            best = [(a[0] + closest[0]) / 2, (a[1] + closest[1]) / 2]
+          }
+        }
+      }
+    }
+  }
+  return best
+}
+
+function closestPointOnSegment(p: LatLng, [a, b]: Segment, lngScale: number): LatLng {
+  const py = p[0] - a[0]
+  const px = (p[1] - a[1]) * lngScale
+  const vy = b[0] - a[0]
+  const vx = (b[1] - a[1]) * lngScale
+  const lenSq = vx * vx + vy * vy
+  if (lenSq === 0) return a
+  const t = Math.max(0, Math.min(1, (px * vx + py * vy) / lenSq))
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+}
+
+/** Where a border crossing's arrow belongs: the midpoint (by arc length)
+ * of the longest stretch of boundary the two zones actually share.
+ *
+ * Both sides are tried and the longer shared run wins, because the two
+ * polygons are simplified independently -- one may carry a dozen vertices
+ * along a border where the other carries two.
+ *
+ * The result sits *on* a real boundary polyline by construction. The
+ * previous version averaged a cloud of nearby vertices from both zones,
+ * which drifts off the border wherever it curves, and around a tripoint
+ * mixed in vertices belonging to a different neighbour's border entirely. */
 function computeBorderPoint(
-  boundaryPoints: Record<string, [number, number][]>,
+  boundaries: Record<string, LatLng[][]>,
+  indexFor: (zone: string) => SegmentIndex | null,
   zoneA: string,
   zoneB: string
-): BorderSegment | null {
-  const pointsA = boundaryPoints[zoneA]
-  const pointsB = boundaryPoints[zoneB]
-  if (!pointsA || !pointsB) return null
+): LatLng | null {
+  const ringsA = boundaries[zoneA]
+  const ringsB = boundaries[zoneB]
+  const indexA = indexFor(zoneA)
+  const indexB = indexFor(zoneB)
+  if (!ringsA || !ringsB || !indexA || !indexB) return null
 
-  let bestA: [number, number] | null = null
-  let bestB: [number, number] | null = null
-  let bestDistSq = Infinity
-  for (const a of pointsA) {
-    for (const b of pointsB) {
-      const d = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
-      if (d < bestDistSq) {
-        bestDistSq = d
-        bestA = a
-        bestB = b
-      }
+  let bestRun: LatLng[] | null = null
+  let bestLength = -1
+  for (const run of [...sharedBorderRuns(ringsA, indexB), ...sharedBorderRuns(ringsB, indexA)]) {
+    const length = polylineLength(run)
+    if (length > bestLength) {
+      bestLength = length
+      bestRun = run
     }
   }
-  if (!bestA || !bestB) return null
-  const anchor: [number, number] = [(bestA[0] + bestB[0]) / 2, (bestA[1] + bestB[1]) / 2]
+  if (bestRun) return midpointAlong(bestRun)
 
-  const radiusSq = BORDER_CLUSTER_RADIUS_DEGREES ** 2
-  const nearAnchor = (p: [number, number]) => (p[0] - anchor[0]) ** 2 + (p[1] - anchor[1]) ** 2 <= radiusSq
-  // The radius is fixed, but the closest approach between two zones isn't
-  // always within it (coarse/simplified zone geometry, or zones that don't
-  // truly share a border) -- fall back to the closest pair itself so the
-  // cluster is never empty (which would otherwise average to NaN).
-  const clusterPoints = [...pointsA.filter(nearAnchor), ...pointsB.filter(nearAnchor)]
-  if (clusterPoints.length === 0) clusterPoints.push(bestA, bestB)
-
-  const lat = clusterPoints.reduce((sum, p) => sum + p[0], 0) / clusterPoints.length
-  const lng = clusterPoints.reduce((sum, p) => sum + p[1], 0) / clusterPoints.length
-
-  // The segment's two ends -- the pair of cluster points with the greatest
-  // mutual distance -- approximate the shared border as a straight line an
-  // icon can slide along. Falls back to the anchor itself (a zero-length
-  // segment) when the cluster is a single point.
-  let start: [number, number] = clusterPoints[0]
-  let end: [number, number] = clusterPoints[0]
-  let bestSpanSq = -1
-  for (const p of clusterPoints) {
-    for (const q of clusterPoints) {
-      const d = (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2
-      if (d > bestSpanSq) {
-        bestSpanSq = d
-        start = p
-        end = q
-      }
-    }
-  }
-
-  return { anchor: [lat, lng], start, end }
+  return closestApproachMidpoint(ringsA, ringsB)
 }
 
 /** Memoizing wrapper factory -- one cache per zone geometry (re-created
- * whenever the GeoJSON is (re-)loaded). */
-export function makeBorderPointFinder(boundaryPoints: Record<string, [number, number][]>) {
-  const cache: Record<string, BorderSegment | null> = {}
-  return function getBorderPoint(zoneA: string, zoneB: string): BorderSegment | null {
+ * whenever the GeoJSON is (re-)loaded). Both the per-pair anchors and the
+ * per-zone segment indexes are built on first use. */
+export function makeBorderPointFinder(boundaries: Record<string, LatLng[][]>) {
+  const anchors: Record<string, LatLng | null> = {}
+  const indexes: Record<string, SegmentIndex | null> = {}
+  const indexFor = (zone: string): SegmentIndex | null => {
+    if (!(zone in indexes)) indexes[zone] = boundaries[zone] ? buildSegmentIndex(boundaries[zone]) : null
+    return indexes[zone]
+  }
+  return function getBorderPoint(zoneA: string, zoneB: string): LatLng | null {
     const key = [zoneA, zoneB].sort().join('|')
-    if (!(key in cache)) cache[key] = computeBorderPoint(boundaryPoints, zoneA, zoneB)
-    return cache[key]
+    if (!(key in anchors)) anchors[key] = computeBorderPoint(boundaries, indexFor, zoneA, zoneB)
+    return anchors[key]
   }
 }

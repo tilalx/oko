@@ -143,11 +143,13 @@
   })
 </script>
 
-<div class="flex h-screen w-screen" id="app">
+<!-- 100dvh, not 100vh: on mobile browsers the retracting URL bar makes vh
+     taller than the visible viewport, which pushes the Timebar off-screen. -->
+<div class="flex h-[100dvh] w-full overflow-hidden" id="app">
   <Sidebar />
   <div class="relative flex-1">
     <MapView bind:this={mapView} onZoneClick={setSelectedZone} />
-    <div class="absolute top-[1.1rem] right-[1.1rem] z-[500] flex flex-col items-end gap-[0.6rem]">
+    <div class="absolute top-2 right-2 z-[500] flex flex-col items-end gap-[0.6rem] sm:top-[1.1rem] sm:right-[1.1rem]">
       <TopBadge />
       <MapActions {mapView} />
     </div>
