@@ -162,17 +162,18 @@ def _get_export_with_cache(
             "failed this run) -- try again later.",
         )
 
-    headers = {
+    headers: dict[str, str] = {
         "ETag": f'"{etag}"',
-        "Last-Modified": last_modified,
         "Cache-Control": "public, max-age=300",
     }
+    if last_modified:
+        headers["Last-Modified"] = last_modified
 
     if_none_match = request.headers.get("If-None-Match", "").strip('"')
     if if_none_match == etag:
-        return JSONResponse(status_code=304, headers=headers)
+        return JSONResponse(content={}, status_code=304, headers=headers)
 
-    return JSONResponse(content=payload, headers=headers)  # type: ignore[return-value]
+    return JSONResponse(content=payload, headers=headers)
 
 
 def _validate_zone(zone: str) -> None:
@@ -194,11 +195,12 @@ def get_forecast(
             detail="No forecast has been produced yet for this zone (bootstrap, or every fetch "
             "failed this run) -- try again later.",
         )
-    headers = {
+    headers: dict[str, str] = {
         "ETag": f'"{etag}"',
-        "Last-Modified": last_modified,
         "Cache-Control": "public, max-age=300",
     }
+    if last_modified:
+        headers["Last-Modified"] = last_modified
     return JSONResponse(content=payload, headers=headers)
 
 
@@ -211,11 +213,12 @@ def get_exchanges(
     payload, etag, last_modified = store.get("exchanges")
     if payload is None:
         raise HTTPException(status_code=503, detail="Exchanges data not available yet.")
-    headers = {
+    headers: dict[str, str] = {
         "ETag": f'"{etag}"',
-        "Last-Modified": last_modified,
         "Cache-Control": "public, max-age=300",
     }
+    if last_modified:
+        headers["Last-Modified"] = last_modified
     return JSONResponse(content=payload, headers=headers)
 
 
@@ -230,11 +233,12 @@ def get_forecast_for_zone(
     payload, etag, last_modified = store.get(_key_for_zone(zone))
     if payload is None:
         raise HTTPException(status_code=503, detail="Forecast data not available yet.")
-    headers = {
+    headers: dict[str, str] = {
         "ETag": f'"{etag}"',
-        "Last-Modified": last_modified,
         "Cache-Control": "public, max-age=300",
     }
+    if last_modified:
+        headers["Last-Modified"] = last_modified
     return JSONResponse(content=payload, headers=headers)
 
 
