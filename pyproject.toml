@@ -7,7 +7,7 @@ license = "AGPL-3.0-or-later"
 requires-python = ">=3.12,<3.14"
 authors = [{ name = "OKO contributors" }]
 dependencies = [
-    "pydantic>=2.7",
+    "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "httpx>=0.28.1",
     "structlog>=24.1",
