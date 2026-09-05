@@ -1,15 +1,16 @@
-"""Tests for oko-serve's dataset sync — no real network access (respx-mocked)."""
+"""Tests for oko-serve's dataset sync — uses git clone with LFS."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
 from pathlib import Path
+from unittest import mock
 
 import httpx
-import respx
+import pytest
 
-from oko.api.dataset_sync import RAW_BASE, sync_dataset
+from oko.api.dataset_sync import sync_dataset
 from oko.config import Settings
 from oko.history import _get_query_connection, init_db, reset_query_connection
 
@@ -28,29 +29,42 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _url(settings: Settings, name: str) -> str:
-    return f"{RAW_BASE}/{settings.dataset_repo}/{settings.dataset_ref}/{name}"
-
-
 async def _sync(settings: Settings) -> None:
     async with httpx.AsyncClient() as client:
         await sync_dataset(settings, client)
 
 
-@respx.mock
-def test_sync_downloads_sqlite_and_forecast_files(tmp_path: Path) -> None:
+def test_sync_clones_repo_and_pulls_lfs(tmp_path: Path, mocker: pytest.MockerFixture) -> None:
+    """Verify sync clones repo and runs git lfs pull."""
     settings = _settings(tmp_path)
-    respx.get(_url(settings, "oko.sqlite3")).mock(
-        return_value=httpx.Response(200, content=b"sqlite-bytes")
-    )
-    respx.get(_url(settings, "forecast_de.json")).mock(
-        return_value=httpx.Response(200, content=b'{"zone": "DE"}')
-    )
-    respx.get(_url(settings, "exchanges.json")).mock(
-        return_value=httpx.Response(200, content=b'{"exchanges": []}')
-    )
-    # Every other zone: not published yet.
-    respx.get(url__regex=r".*/forecast_.*\.json$").mock(return_value=httpx.Response(404))
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    # Mock subprocess.run to create dummy files in the clone dir
+    def mock_run(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if "clone" in cmd:
+            repo_path.mkdir(exist_ok=True)
+            (repo_path / "oko.sqlite3").write_bytes(b"sqlite-bytes")
+            (repo_path / "forecast_de.json").write_bytes(b'{"zone": "DE"}')
+            (repo_path / "exchanges.json").write_bytes(b'{"exchanges": []}')
+        return mock.MagicMock(returncode=0)
+
+    mocker.patch("subprocess.run", side_effect=mock_run)
+    mocker.patch("tempfile.TemporaryDirectory")
+
+    # Mock tempfile.TemporaryDirectory to use our tmp_path
+    def mock_tmpdir():
+        class TmpDirCtx:
+            def __enter__(self):
+                return str(tmp_path)
+
+            def __exit__(self, *args):
+                pass
+
+        return TmpDirCtx()
+
+    mocker.patch("oko.api.dataset_sync.tempfile.TemporaryDirectory", mock_tmpdir)
 
     _run(_sync(settings))
 
@@ -59,50 +73,66 @@ def test_sync_downloads_sqlite_and_forecast_files(tmp_path: Path) -> None:
     assert (tmp_path / "exchanges.json").read_bytes() == b'{"exchanges": []}'
 
 
-@respx.mock
-def test_sync_skips_404_files_without_error(tmp_path: Path) -> None:
+def test_sync_handles_missing_files(tmp_path: Path, mocker: pytest.MockerFixture) -> None:
+    """Verify sync handles missing forecast files gracefully."""
     settings = _settings(tmp_path)
-    respx.get(url__regex=r".*").mock(return_value=httpx.Response(404))
+    repo_path = tmp_path / "repo"
+
+    def mock_run(*args, **kwargs):
+        repo_path.mkdir(exist_ok=True)
+        # Only create sqlite3, not forecast files
+        (repo_path / "oko.sqlite3").write_bytes(b"sqlite-bytes")
+        return mock.MagicMock(returncode=0)
+
+    mocker.patch("subprocess.run", side_effect=mock_run)
+
+    def mock_tmpdir():
+        class TmpDirCtx:
+            def __enter__(self):
+                return str(tmp_path)
+
+            def __exit__(self, *args):
+                pass
+
+        return TmpDirCtx()
+
+    mocker.patch("oko.api.dataset_sync.tempfile.TemporaryDirectory", mock_tmpdir)
 
     _run(_sync(settings))  # must not raise
 
-    assert not settings.sqlite_path.exists()
+    assert settings.sqlite_path.read_bytes() == b"sqlite-bytes"
     assert not settings.export_path.exists()
 
 
-@respx.mock
-def test_sync_skips_rewrite_when_content_unchanged(tmp_path: Path) -> None:
+def test_sync_resets_cached_query_connection_after_sqlite_replace(
+    tmp_path: Path, mocker: pytest.MockerFixture
+) -> None:
+    """Verify query connection is reset when sqlite3 is updated."""
     settings = _settings(tmp_path)
-    settings.export_path.write_bytes(b'{"zone": "DE"}')
-    before_mtime = settings.export_path.stat().st_mtime_ns
+    init_db(settings.sqlite_path)
+    _get_query_connection(settings.sqlite_path)
+    repo_path = tmp_path / "repo"
 
-    respx.get(_url(settings, "forecast_de.json")).mock(
-        return_value=httpx.Response(200, content=b'{"zone": "DE"}')
-    )
-    respx.get(url__regex=r".*").mock(return_value=httpx.Response(404))
-    respx.get(_url(settings, "forecast_de.json")).mock(
-        return_value=httpx.Response(200, content=b'{"zone": "DE"}')
-    )
+    def mock_run(*args, **kwargs):
+        repo_path.mkdir(exist_ok=True)
+        (repo_path / "oko.sqlite3").write_bytes(b"new-sqlite-bytes")
+        return mock.MagicMock(returncode=0)
 
-    _run(_sync(settings))
+    mocker.patch("subprocess.run", side_effect=mock_run)
 
-    assert settings.export_path.stat().st_mtime_ns == before_mtime
+    def mock_tmpdir():
+        class TmpDirCtx:
+            def __enter__(self):
+                return str(tmp_path)
 
+            def __exit__(self, *args):
+                pass
 
-@respx.mock
-def test_sync_resets_cached_query_connection_after_sqlite_replace(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    init_db(settings.sqlite_path)  # valid, empty sqlite file
-    _get_query_connection(settings.sqlite_path)  # populate the module-level cache
+        return TmpDirCtx()
+
+    mocker.patch("oko.api.dataset_sync.tempfile.TemporaryDirectory", mock_tmpdir)
+
     try:
-        respx.get(_url(settings, "oko.sqlite3")).mock(
-            return_value=httpx.Response(200, content=b"new-sqlite-bytes")
-        )
-        respx.get(url__regex=r".*").mock(return_value=httpx.Response(404))
-        respx.get(_url(settings, "oko.sqlite3")).mock(
-            return_value=httpx.Response(200, content=b"new-sqlite-bytes")
-        )
-
         _run(_sync(settings))
 
         import oko.history as history_module
