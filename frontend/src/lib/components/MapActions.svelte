@@ -39,14 +39,6 @@
   >
     <Icon name="flow" size="1.05em" />
   </Button>
-  <Button
-    variant="icon"
-    size="icon-sm"
-    title={t('mapActions.toggleBasemap')}
-    onclick={() => (oko.tilesLight = !oko.tilesLight)}
-  >
-    <Icon name={oko.tilesLight ? 'sun' : 'moon'} size="1.05em" />
-  </Button>
   <Popover bind:open={settingsOpen}>
     {#snippet trigger()}
       <Button variant="icon" size="icon-sm" title={t('mapActions.settings')}><Icon name="settings" size="1.05em" /></Button>

@@ -3,8 +3,8 @@
   import { t } from '$lib/i18n'
   import { formatDate, formatFullDateTime, formatTime } from '$lib/format'
 
-  const point = $derived(oko.unifiedPoints(oko.selectedZone)[oko.horizonIndex])
-  const atNow = $derived(oko.horizonIndex === oko.nowSeamIndex(oko.selectedZone))
+  const point = $derived(oko.pointAtTime(oko.selectedZone, oko.horizonTime))
+  const atNow = $derived(oko.horizonAtNow)
   const date = $derived(point ? new Date(point.timestamp) : null)
 </script>
 

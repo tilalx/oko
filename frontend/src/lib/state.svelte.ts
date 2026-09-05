@@ -1,6 +1,18 @@
 import type { CurrentBreakdown, ExchangeEdge, ForecastPoint, HistoryPoint } from './api'
-import { COLORBLIND_INTENSITY_STOPS, COLORBLIND_PRICE_STOPS, INTENSITY_STOPS, PRICE_STOPS } from './constants'
+import {
+  COLORBLIND_INTENSITY_STOPS,
+  COLORBLIND_PRICE_STOPS,
+  INTENSITY_STOPS,
+  PRICE_STOPS,
+  WINDOW_HOURS,
+} from './constants'
 import { detectLocale, detectTimeZone, detectHourCycle } from './i18n'
+
+const HOUR_MS = 3_600_000
+/** How far a point's timestamp may sit from a queried time and still count
+ * as "at" it -- half the hourly data resolution, so a scrub position never
+ * silently borrows a neighboring hour's value. */
+const POINT_MATCH_TOLERANCE_MS = 30 * 60 * 1000
 
 function loadBool(key: string): boolean {
   try {
@@ -35,11 +47,27 @@ class OkoState {
   exchangesData = $state<ExchangeEdge[]>([])
 
   flowLinesVisible = $state(true)
-  /** Index into the selected zone's unified [...history, ...forecast] array. */
-  horizonIndex = $state(0)
+  /** Absolute scrub position, as an epoch-ms timestamp -- meaningful
+   * identically across every zone, unlike an index into a zone-specific
+   * array (whose length varies with how gappy that zone's ENTSO-E history
+   * is). See Timebar.svelte. */
+  horizonTime = $state(Date.now())
   /** Whether the timeline is pinned to "now" (vs user-scrubbed). */
   horizonAtNow = $state(true)
   playing = $state(false)
+
+  /** Wall-clock "now", ticked independently of the ~5min data refresh so
+   * the Timebar's window and "now" marker track live. */
+  nowMs = $state(Date.now())
+  /** Timebar zoom preset -- see WINDOW_HOURS. */
+  windowGranularity = $state<'day' | 'week' | 'month'>('day')
+
+  /** `nowMs` floored to the top of the hour -- data is hourly-resolution,
+   * so window bounds and "at now" comparisons anchor here rather than to
+   * the constantly-ticking millisecond clock. */
+  nowHourMs = $derived(Math.floor(this.nowMs / HOUR_MS) * HOUR_MS)
+  windowStartMs = $derived(this.nowHourMs - WINDOW_HOURS[this.windowGranularity].before * HOUR_MS)
+  windowEndMs = $derived(this.nowHourMs + WINDOW_HOURS[this.windowGranularity].after * HOUR_MS)
 
   allZones = $state<string[]>([])
   /** Latest observed CurrentBreakdown for the selected zone. */
@@ -53,7 +81,6 @@ class OkoState {
   sidebarCollapsed = $state(loadBool('oko-sidebar-collapsed'))
   promoDismissed = $state(loadBool('oko-promo-dismissed'))
   cardVisible = $state(true)
-  tilesLight = $state(false)
   locale = $state(detectLocale())
   timeZone = $state(detectTimeZone())
 
@@ -88,10 +115,6 @@ class OkoState {
     return [...(this.zoneHistory[zone] || []), ...(this.zoneForecasts[zone] || [])]
   }
 
-  nowSeamIndex(zone: string): number {
-    return Math.max(0, this.historyLength(zone) - 1)
-  }
-
   /** Lifecycle-inclusive intensity when available, falling back to direct
    * for a zone whose lifecycle model hasn't bootstrapped yet -- OKO's UI
    * shows one carbon-intensity number, not a direct/lifecycle choice. */
@@ -100,25 +123,26 @@ class OkoState {
     return point.value_lifecycle ?? point.value ?? null
   }
 
-  zoneValueAtUnifiedIndex(zone: string, index: number): number | null {
+  /** The unified point closest to `timeMs`, or `null` if the nearest one
+   * is more than half an hour away -- an absolute timestamp is meaningful
+   * identically for every zone, so (unlike an index) this needs no
+   * per-zone re-anchoring when the selected zone changes. */
+  pointAtTime(zone: string, timeMs: number): HistoryPoint | ForecastPoint | null {
     const points = this.unifiedPoints(zone)
-    if (!points.length) return null
-    const clamped = Math.max(0, Math.min(index, points.length - 1))
-    return this.pointValue(points[clamped])
+    let best: HistoryPoint | ForecastPoint | null = null
+    let bestDiff = Infinity
+    for (const point of points) {
+      const diff = Math.abs(new Date(point.timestamp).getTime() - timeMs)
+      if (diff < bestDiff) {
+        best = point
+        bestDiff = diff
+      }
+    }
+    return bestDiff <= POINT_MATCH_TOLERANCE_MS ? best : null
   }
 
-  /** horizonIndex is an absolute index into the *selected* zone's unified
-   * timeline. Every other zone's unifiedPoints array can be a different
-   * length (zones with gappier/laggier ENTSO-E history have a shorter
-   * history portion), so reusing that same absolute index for them would
-   * silently spill past their "now" seam into their forecast array --
-   * e.g. showing France's forecast under DE-LU's "now" position. Instead,
-   * carry the scrub position as an *offset from "now"* and re-anchor it to
-   * each zone's own now-seam, so every zone shows its own observed value
-   * at "now" and the same relative hour when scrubbed. */
-  horizonIndexForZone(zone: string): number {
-    const offset = this.horizonIndex - this.nowSeamIndex(this.selectedZone)
-    return this.nowSeamIndex(zone) + offset
+  zoneValueAtTime(zone: string, timeMs: number): number | null {
+    return this.pointValue(this.pointAtTime(zone, timeMs))
   }
 }
 

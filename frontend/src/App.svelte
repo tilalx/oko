@@ -29,21 +29,18 @@
   let status = $state(t('app.loading'))
   let payload = $state<ForecastPayload | null>(null)
 
+  /** One request for every zone's forecast + history, instead of 2*N
+   * individual per-zone requests -- see GET /api/bulk. Browsers cap
+   * concurrent connections per origin, so with dozens of zones most of
+   * those individual requests just queue behind each other. */
   async function fetchAllForecasts(zones: string[]) {
-    const [forecastResults, historyResults] = await Promise.all([
-      Promise.allSettled(zones.map((zone) => api.getForecast(zone))),
-      Promise.allSettled(zones.map((zone) => api.getHistory(zone, HISTORY_SCRUB_HOURS))),
-    ])
-    zones.forEach((zone, i) => {
-      const result = forecastResults[i]
-      const fp = result.status === 'fulfilled' ? result.value.payload : null
-      oko.zoneForecasts[zone] = fp?.forecast || []
-      oko.zoneCurrent[zone] = fp?.current || null
-    })
-    zones.forEach((zone, i) => {
-      const result = historyResults[i]
-      oko.zoneHistory[zone] = (result.status === 'fulfilled' && result.value) || []
-    })
+    const zoneData = await api.getBulkZoneData(HISTORY_SCRUB_HOURS)
+    for (const zone of zones) {
+      const entry = zoneData[zone]
+      oko.zoneForecasts[zone] = entry?.forecast?.forecast || []
+      oko.zoneCurrent[zone] = entry?.forecast?.current || null
+      oko.zoneHistory[zone] = entry?.history || []
+    }
   }
 
   /** The export's 'current' block carries the latest observed hour's power
@@ -81,15 +78,11 @@
     await fetchLatestObserved(zone)
     oko.zoneForecasts[zone] = fp.forecast || []
     oko.zoneCurrent[zone] = fp.current || null
-    // fetchLatestObserved may have changed historyLength(zone) by a point
-    // or two since setSelectedZone's earlier estimate -- only resnap to
-    // "now" against the now-fresh data if the user is still pinned to
-    // live; a user who scrubbed away from "now" keeps their position.
+    // Only resnap to live "now" if the user is still pinned to it; a user
+    // who scrubbed away from "now" keeps their absolute scrub position --
+    // it's a timestamp, meaningful unchanged across zones and refreshes.
     if (oko.horizonAtNow) {
-      oko.horizonIndex = oko.nowSeamIndex(zone)
-    } else {
-      const maxIndex = Math.max(0, oko.unifiedPoints(zone).length - 1)
-      oko.horizonIndex = Math.min(oko.horizonIndex, maxIndex)
+      oko.horizonTime = oko.nowHourMs
     }
     oko.lastCurrent = fp.current
     payload = fp
@@ -99,19 +92,12 @@
   }
 
   function setSelectedZone(zone: string) {
-    const prevZone = oko.selectedZone
-    const wasAtNow = oko.horizonAtNow
-    // Preserve the scrub position (as an offset from "now") across zone
-    // switches instead of snapping back to live -- a user scrubbing the
-    // timeline shouldn't lose their place just by picking another country.
-    const offset = oko.horizonIndex - oko.nowSeamIndex(prevZone)
+    // horizonTime is an absolute timestamp, meaningful identically across
+    // every zone -- unlike the old array-index scrub position, switching
+    // zones needs no reconciliation at all. A user's scrub position (or
+    // "at now" pin) survives the switch unchanged.
     oko.selectedZone = zone
-    if (wasAtNow) {
-      oko.horizonIndex = oko.nowSeamIndex(zone)
-    } else {
-      const maxIndex = Math.max(0, oko.unifiedPoints(zone).length - 1)
-      oko.horizonIndex = Math.min(maxIndex, Math.max(0, oko.nowSeamIndex(zone) + offset))
-    }
+    if (oko.horizonAtNow) oko.horizonTime = oko.nowHourMs
     oko.cardVisible = true
     loadForecast(zone)
   }
@@ -119,26 +105,41 @@
   async function refreshAllZoneData() {
     await fetchAllForecasts(oko.allZones)
     oko.exchangesData = await api.getExchanges()
-    if (oko.horizonAtNow) oko.horizonIndex = oko.nowSeamIndex(oko.selectedZone)
+    if (oko.horizonAtNow) oko.horizonTime = oko.nowHourMs
     oko.lastCurrent = oko.zoneCurrent[oko.selectedZone] || oko.lastCurrent
   }
 
   onMount(() => {
     let interval: ReturnType<typeof setInterval>
+    let nowTicker: ReturnType<typeof setInterval>
     ;(async () => {
-      oko.allZones = await api.getZones()
-      await Promise.all([fetchAllForecasts(oko.allZones), api.getExchanges().then((e) => (oko.exchangesData = e))])
-      // First-paint tooltips/fills anchored at "now", not at horizonIndex's
-      // initial value of 0 -- otherwise every zone's tooltip and fill
-      // color is anchored to the oldest history point until the user
-      // drags the slider or switches zones.
-      oko.horizonIndex = oko.nowSeamIndex(oko.selectedZone)
+      // Map init (fetching/parsing zones.geojson) has no dependency on
+      // zone/forecast data -- run it concurrently with the zone list and
+      // exchanges fetch instead of serializing it after the forecast
+      // round trip.
+      const [zones] = await Promise.all([
+        api.getZones(),
+        mapView?.init(),
+        api.getExchanges().then((e) => {
+          oko.exchangesData = e
+        }),
+      ])
+      oko.allZones = zones
+      await fetchAllForecasts(zones)
+      // First-paint tooltips/fills anchored at "now", not at horizonTime's
+      // initial (page-load) value -- otherwise every zone's tooltip and
+      // fill color is anchored to whatever moment the tab was opened until
+      // the user drags the slider or switches zones.
+      oko.horizonTime = oko.nowHourMs
       oko.horizonAtNow = true
-      await mapView?.init()
       setSelectedZone('DE-LU')
       interval = setInterval(refreshAllZoneData, AUTO_REFRESH_INTERVAL_MS)
+      nowTicker = setInterval(() => (oko.nowMs = Date.now()), 60_000)
     })()
-    return () => clearInterval(interval)
+    return () => {
+      clearInterval(interval)
+      clearInterval(nowTicker)
+    }
   })
 </script>
 

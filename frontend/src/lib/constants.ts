@@ -116,8 +116,23 @@ export const CATEGORY_META: Record<string, { icon: string; color: string }> = {
 
 /** Hours of recent observed history prepended to the forecast horizon so
  * the timeline can be scrubbed into the past as well as the future -- see
- * `unifiedPoints`/`nowSeamIndex` in state.svelte.ts. */
-export const HISTORY_SCRUB_HOURS = 48
+ * `unifiedPoints` in state.svelte.ts. Sized to cover the largest
+ * WINDOW_HOURS.month.before below so switching zoom granularity never
+ * needs a separate history refetch. */
+export const HISTORY_SCRUB_HOURS = 240
+
+/** Timebar window size per zoom granularity, in hours before/after "now" --
+ * a fixed 1:2 ratio so "now" always sits at the same relative position on
+ * the bar regardless of how much real data a given zone happens to have
+ * (see Timebar.svelte). `month`'s `after` exceeds the forecast model's
+ * actual horizon (FORECAST_HORIZON_HOURS = 120h server-side), so the
+ * rightmost stretch of a "month" window legitimately shows no data --
+ * nothing is predicted that far out. */
+export const WINDOW_HOURS: Record<'day' | 'week' | 'month', { before: number; after: number }> = {
+  day: { before: 8, after: 16 },
+  week: { before: 56, after: 112 },
+  month: { before: 240, after: 480 },
+}
 
 /** How often to re-fetch every zone's forecast+history in the background. */
 export const AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000

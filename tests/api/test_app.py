@@ -165,9 +165,9 @@ def test_built_frontend_js_bundle_served() -> None:
     from oko.api.app import STATIC_DIR
 
     bundles = list((STATIC_DIR / "assets").glob("*.js"))
-    assert bundles, (
-        "expected a built JS bundle under static/assets/ -- run `cd frontend && npm run build`"
-    )
+    assert (
+        bundles
+    ), "expected a built JS bundle under static/assets/ -- run `cd frontend && npm run build`"
     response = TestClient(app).get(f"/assets/{bundles[0].name}")
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
@@ -230,6 +230,30 @@ def test_history_endpoint_404_for_unknown_zone(client_with_two_zones: TestClient
 
 def test_history_endpoint_rejects_non_positive_hours(client_with_two_zones: TestClient) -> None:
     response = client_with_two_zones.get("/history/DE-LU", params={"hours": 0})
+    assert response.status_code == 400
+
+
+def test_bulk_endpoint_returns_every_zone_with_forecast_and_history(
+    client_with_two_zones: TestClient,
+) -> None:
+    response = client_with_two_zones.get("/api/bulk", params={"hours": 24 * 365})
+    assert response.status_code == 200
+    zones = response.json()["zones"]
+    assert set(zones) == set(FLOW_TRACING_ZONES)
+
+    assert zones["DE-LU"]["forecast"] == _payload("DE-LU")
+    assert len(zones["DE-LU"]["history"]) == 1
+    assert zones["DE-LU"]["history"][0]["value"] == 250.0
+
+    assert zones["FR"]["forecast"] == _payload("FR")
+    assert zones["FR"]["history"] == []
+
+    assert zones["AT"]["forecast"] is None
+    assert zones["AT"]["history"] == []
+
+
+def test_bulk_endpoint_rejects_non_positive_hours(client_with_two_zones: TestClient) -> None:
+    response = client_with_two_zones.get("/api/bulk", params={"hours": 0})
     assert response.status_code == 400
 
 

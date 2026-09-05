@@ -40,6 +40,7 @@ repos:
       - id: check-toml
       - id: check-xml
       - id: check-added-large-files
+        args: ['--maxkb=1024']
       - id: check-merge-conflict
       - id: end-of-file-fixer
       - id: trailing-whitespace

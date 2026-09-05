@@ -31,6 +31,8 @@
     play: '<path d="M7 5v14l12-7Z"/>',
     pause: '<path d="M8 5v14M16 5v14"/>',
     coverage: '<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16"/>',
+    target:
+      '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
     docs: '<path d="M6 3h9l5 5v13H6Z"/><path d="M15 3v5h5"/><path d="M9 13h6M9 17h6"/>',
 
     // Generation categories -- flat geometric strokes, not mini pictograms,

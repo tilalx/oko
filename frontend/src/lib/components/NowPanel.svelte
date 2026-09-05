@@ -40,16 +40,15 @@
    * server-side emission-factor weighting, only computed for the latest
    * observed hour (`current`), so it stays unavailable elsewhere. */
   function breakdownForMix(
-    point: HistoryPoint | ForecastPoint | undefined,
+    point: HistoryPoint | ForecastPoint | undefined | null,
     current: CurrentBreakdown | null
   ): Record<string, number> | null {
     if (oko.mixView === 'emissions') return current?.emissions_breakdown_percent || null
     return point?.power_breakdown_percent || current?.power_breakdown_percent || null
   }
 
-  const points = $derived(oko.unifiedPoints(oko.selectedZone))
-  const point = $derived(points[oko.horizonIndex])
-  const atNow = $derived(oko.horizonIndex === oko.nowSeamIndex(oko.selectedZone))
+  const point = $derived(oko.pointAtTime(oko.selectedZone, oko.horizonTime))
+  const atNow = $derived(oko.horizonAtNow)
   const current = $derived(atNow ? oko.lastCurrent : null)
   const shownValue = $derived(oko.pointValue(point))
   const rgb = $derived(rgbForIntensity(shownValue, oko.activeIntensityStops) || [90, 95, 88])

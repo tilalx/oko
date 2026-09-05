@@ -88,61 +88,107 @@ export function flowBearingDegrees([lat1, lng1]: [number, number], [lat2, lng2]:
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360
 }
 
-/** Extra distance (degrees) beyond the closest approach within which a
- * vertex still counts as part of the same shared border run. A long
+/** Radius (degrees) around the actual closest-approach point within which
+ * a vertex still counts as part of the same shared border run. A long
  * straight shared border only has vertices at its two corner ends (a
  * straight line needs no vertices in between) -- taking just the single
  * closest vertex pair always snaps the marker to whichever corner happens
- * to be nearest. Pulling in every vertex within this margin picks up both
- * ends of that long edge (plus any other nearby corners), so averaging
- * them lands the marker along the border, not pinned to one corner. */
-const BORDER_CLUSTER_MARGIN_DEGREES = 0.15
+ * to be nearest. Pulling in every vertex near that closest-approach point
+ * picks up both ends of that long edge (plus any other nearby corners),
+ * so averaging them lands the marker along the border, not pinned to one
+ * corner.
+ *
+ * Anchored to the *location* of the closest approach, not just its
+ * *distance* -- a zone with a complex, multi-part coastline (e.g. Norway's
+ * or Sweden's fjord/archipelago boundaries) can have several separate
+ * points that are each individually close to the other zone, at different
+ * locations; including all of them (as a distance-only threshold would)
+ * averages across disjoint border segments and can land the marker in open
+ * water between them. */
+const BORDER_CLUSTER_RADIUS_DEGREES = 0.15
 
 /** Vertices of each zone's boundary that lie within
- * BORDER_CLUSTER_MARGIN_DEGREES of the other zone's closest approach,
- * averaged together -- the shared border "run" between two zones, not
- * just their single nearest vertex pair. O(|A|*|B|) vertices; called once
- * per pair and memoized by the caller (see makeBorderPointCache) -- each
- * zone has only tens to a few hundred vertices, so this is negligible
+ * BORDER_CLUSTER_RADIUS_DEGREES of the true closest-approach point between
+ * the two zones, averaged together -- the shared border "run", not just
+ * the single nearest vertex pair and not any other coincidentally-close
+ * vertex elsewhere on a complex coastline. O(|A|*|B|) vertices; called
+ * once per pair and memoized by the caller (see makeBorderPointFinder) --
+ * each zone has only tens to a few hundred vertices, so this is negligible
  * even across all borders. */
+/** A border crossing's anchor (for icon placement/priority) plus the two
+ * extremes of the local shared-border run, as a straight-line
+ * approximation an icon can slide along to avoid overlapping a
+ * neighboring crossing's icon (see MapView's drawFlowLines) without
+ * drifting off the actual border. */
+export interface BorderSegment {
+  anchor: [number, number]
+  start: [number, number]
+  end: [number, number]
+}
+
 function computeBorderPoint(
   boundaryPoints: Record<string, [number, number][]>,
   zoneA: string,
   zoneB: string
-): [number, number] | null {
+): BorderSegment | null {
   const pointsA = boundaryPoints[zoneA]
   const pointsB = boundaryPoints[zoneB]
   if (!pointsA || !pointsB) return null
 
-  const nearestDistSq = (point: [number, number], others: [number, number][]) => {
-    let best = Infinity
-    for (const o of others) {
-      const d = (point[0] - o[0]) ** 2 + (point[1] - o[1]) ** 2
-      if (d < best) best = d
+  let bestA: [number, number] | null = null
+  let bestB: [number, number] | null = null
+  let bestDistSq = Infinity
+  for (const a of pointsA) {
+    for (const b of pointsB) {
+      const d = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+      if (d < bestDistSq) {
+        bestDistSq = d
+        bestA = a
+        bestB = b
+      }
     }
-    return best
   }
+  if (!bestA || !bestB) return null
+  const anchor: [number, number] = [(bestA[0] + bestB[0]) / 2, (bestA[1] + bestB[1]) / 2]
 
-  const distsA = pointsA.map((a) => nearestDistSq(a, pointsB))
-  const distsB = pointsB.map((b) => nearestDistSq(b, pointsA))
-  const minDistSq = Math.min(...distsA, ...distsB)
-  if (!isFinite(minDistSq)) return null
-
-  const thresholdSq = (Math.sqrt(minDistSq) + BORDER_CLUSTER_MARGIN_DEGREES) ** 2
-  const clusterPoints: [number, number][] = []
-  pointsA.forEach((a, i) => distsA[i] <= thresholdSq && clusterPoints.push(a))
-  pointsB.forEach((b, i) => distsB[i] <= thresholdSq && clusterPoints.push(b))
+  const radiusSq = BORDER_CLUSTER_RADIUS_DEGREES ** 2
+  const nearAnchor = (p: [number, number]) => (p[0] - anchor[0]) ** 2 + (p[1] - anchor[1]) ** 2 <= radiusSq
+  // The radius is fixed, but the closest approach between two zones isn't
+  // always within it (coarse/simplified zone geometry, or zones that don't
+  // truly share a border) -- fall back to the closest pair itself so the
+  // cluster is never empty (which would otherwise average to NaN).
+  const clusterPoints = [...pointsA.filter(nearAnchor), ...pointsB.filter(nearAnchor)]
+  if (clusterPoints.length === 0) clusterPoints.push(bestA, bestB)
 
   const lat = clusterPoints.reduce((sum, p) => sum + p[0], 0) / clusterPoints.length
   const lng = clusterPoints.reduce((sum, p) => sum + p[1], 0) / clusterPoints.length
-  return [lat, lng]
+
+  // The segment's two ends -- the pair of cluster points with the greatest
+  // mutual distance -- approximate the shared border as a straight line an
+  // icon can slide along. Falls back to the anchor itself (a zero-length
+  // segment) when the cluster is a single point.
+  let start: [number, number] = clusterPoints[0]
+  let end: [number, number] = clusterPoints[0]
+  let bestSpanSq = -1
+  for (const p of clusterPoints) {
+    for (const q of clusterPoints) {
+      const d = (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2
+      if (d > bestSpanSq) {
+        bestSpanSq = d
+        start = p
+        end = q
+      }
+    }
+  }
+
+  return { anchor: [lat, lng], start, end }
 }
 
 /** Memoizing wrapper factory -- one cache per zone geometry (re-created
  * whenever the GeoJSON is (re-)loaded). */
 export function makeBorderPointFinder(boundaryPoints: Record<string, [number, number][]>) {
-  const cache: Record<string, [number, number] | null> = {}
-  return function getBorderPoint(zoneA: string, zoneB: string): [number, number] | null {
+  const cache: Record<string, BorderSegment | null> = {}
+  return function getBorderPoint(zoneA: string, zoneB: string): BorderSegment | null {
     const key = [zoneA, zoneB].sort().join('|')
     if (!(key in cache)) cache[key] = computeBorderPoint(boundaryPoints, zoneA, zoneB)
     return cache[key]

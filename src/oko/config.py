@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 import structlog
@@ -347,6 +348,12 @@ class Settings(BaseSettings):
         return "https://github.com/tilalx/oko"
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Load application settings from environment."""
+    """Load application settings from environment.
+
+    Cached: ``Settings()`` re-runs ``model_post_init``'s validation logging
+    on every call, so an uncached ``Depends(get_settings)`` logged
+    ``config.entsoe_token_not_configured`` on every single request.
+    """
     return Settings()

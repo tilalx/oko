@@ -39,7 +39,7 @@ from oko.api.dataset_sync import sync_dataset
 from oko.api.evcc import to_evcc_rates
 from oko.api.store import DataStore
 from oko.config import FLOW_TRACING_ZONES, TARGET_ZONE, Settings, get_settings
-from oko.history import MAX_HISTORY_QUERY_HOURS, query_recent
+from oko.history import MAX_HISTORY_QUERY_HOURS, HistoryPoint, query_recent
 from oko.isoformat import format_iso_z
 
 logger = structlog.get_logger(__name__)
@@ -278,6 +278,20 @@ def get_evcc_co2_for_zone(
     )
 
 
+def _serialize_history_points(points: list[HistoryPoint]) -> list[dict[str, Any]]:
+    return [
+        {
+            "timestamp": format_iso_z(point.timestamp),
+            "value": point.value_g_per_kwh,
+            "value_lifecycle": point.value_lifecycle_g_per_kwh,
+            "method": point.method,
+            "power_breakdown_percent": point.breakdown_percent,
+            "price_eur_per_mwh": point.price_eur_per_mwh,
+        }
+        for point in points
+    ]
+
+
 @app.get("/history/{zone}")
 def get_history(
     zone: str,
@@ -293,23 +307,42 @@ def get_history(
         raise HTTPException(status_code=400, detail="hours must be positive")
     since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=min(hours, MAX_HISTORY_QUERY_HOURS))
     points = query_recent(settings.sqlite_path, zone, since)
-
-    history_points = [
-        {
-            "timestamp": format_iso_z(point.timestamp),
-            "value": point.value_g_per_kwh,
-            "value_lifecycle": point.value_lifecycle_g_per_kwh,
-            "method": point.method,
-            "power_breakdown_percent": point.breakdown_percent,
-            "price_eur_per_mwh": point.price_eur_per_mwh,
-        }
-        for point in points
-    ]
     return JSONResponse(
-        content=history_points,
+        content=_serialize_history_points(points),
         headers={
             "Cache-Control": "public, max-age=300",
         },
+    )
+
+
+@app.get("/api/bulk", response_model=schemas.BulkResponse)
+def get_bulk(
+    settings: SettingsDep,
+    store: StoreDep,
+    hours: int = DEFAULT_HISTORY_HOURS,
+) -> JSONResponse:
+    """Every published zone's forecast + recent history in one response.
+
+    The frontend's startup load otherwise fires 2 requests per zone (2*N
+    total) -- individually cheap, but browsers cap concurrent connections
+    per origin, so with dozens of zones most of those requests just queue.
+    One response with everything already in memory (forecasts) or a fast
+    local query (history) sidesteps that entirely.
+    """
+    if hours <= 0:
+        raise HTTPException(status_code=400, detail="hours must be positive")
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=min(hours, MAX_HISTORY_QUERY_HOURS))
+    zones_payload: dict[str, dict[str, Any]] = {}
+    for zone in FLOW_TRACING_ZONES:
+        payload, _, _ = store.get(_key_for_zone(zone))
+        points = query_recent(settings.sqlite_path, zone, since)
+        zones_payload[zone] = {
+            "forecast": payload,
+            "history": _serialize_history_points(points),
+        }
+    return JSONResponse(
+        content={"zones": zones_payload},
+        headers={"Cache-Control": "public, max-age=300"},
     )
 
 

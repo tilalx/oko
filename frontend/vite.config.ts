@@ -25,6 +25,7 @@ export default defineConfig({
       '/de.json': 'http://localhost:8000',
       '/exchanges.json': 'http://localhost:8000',
       '/zones.geojson': 'http://localhost:8000',
+      '/world-countries.geojson': 'http://localhost:8000',
       '/zones': 'http://localhost:8000',
       '/history': 'http://localhost:8000',
       '/api/': 'http://localhost:8000',

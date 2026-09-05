@@ -15,7 +15,9 @@
   const forecastSub = $derived(
     points.length ? t('forecastPanel.offsetAndModel', { offset: points.length, version: payload?.model_version }) : t('forecastPanel.noForecastYet')
   )
-  const forecastHighlightIndex = $derived(oko.horizonIndex - oko.historyLength(oko.selectedZone))
+  const forecastHighlightIndex = $derived(
+    points.findIndex((p) => Math.abs(new Date(p.timestamp).getTime() - oko.horizonTime) <= 30 * 60 * 1000)
+  )
 
   const PRICE_LINE_COLOR = '#7aa6c2'
 
@@ -83,7 +85,7 @@
   }
 
   // Rebuild whenever the forecast payload itself changes (new data/zone);
-  // just re-highlight the scrub position on horizonIndex changes alone.
+  // just re-highlight the scrub position on horizonTime changes alone.
   $effect(() => {
     void payload
     buildChart()

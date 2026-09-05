@@ -89,6 +89,25 @@ export async function getHistory(zone: string, hours = HISTORY_SCRUB_HOURS): Pro
   }
 }
 
+export interface BulkZoneData {
+  forecast: ForecastPayload | null
+  history: HistoryPoint[]
+}
+
+/** Every published zone's forecast + recent history in one response --
+ * used for startup/refresh instead of firing 2 requests per zone (see
+ * GET /api/bulk). */
+export async function getBulkZoneData(hours = HISTORY_SCRUB_HOURS): Promise<Record<string, BulkZoneData>> {
+  try {
+    const res = await fetch(`/api/bulk?hours=${hours}`, { cache: 'no-store' })
+    if (!res.ok) return {}
+    const payload: { zones: Record<string, BulkZoneData> } = await res.json()
+    return payload.zones || {}
+  } catch {
+    return {}
+  }
+}
+
 export async function getExchanges(): Promise<ExchangeEdge[]> {
   try {
     const res = await fetch('/exchanges.json', { cache: 'no-store' })
@@ -102,5 +121,12 @@ export async function getExchanges(): Promise<ExchangeEdge[]> {
 
 export async function getZonesGeoJson(): Promise<any> {
   const res = await fetch('/zones.geojson', { cache: 'force-cache' })
+  return res.json()
+}
+
+/** Country borders for the rest of the world -- drawn as a dim,
+ * non-interactive backdrop behind the data zones (see MapView). */
+export async function getWorldCountriesGeoJson(): Promise<any> {
+  const res = await fetch('/world-countries.geojson', { cache: 'force-cache' })
   return res.json()
 }

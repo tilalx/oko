@@ -10,7 +10,7 @@
 </script>
 
 <div
-  class="absolute right-[1.1rem] bottom-[5.2rem] z-[500] w-[230px] rounded-lg border border-border bg-[var(--card-translucent)] p-[0.6rem_0.85rem] text-[0.72rem] text-muted-foreground backdrop-blur-md"
+  class="absolute right-[1.1rem] bottom-[7.3rem] z-[500] w-[230px] rounded-lg border border-border bg-[var(--card-translucent)] p-[0.6rem_0.85rem] text-[0.72rem] text-muted-foreground backdrop-blur-md"
 >
   <div class="mb-[0.4rem] text-[0.74rem] text-foreground">{t('mapLegend.carbonIntensity')}</div>
   <div class="mb-[0.3rem] h-[5px] rounded-full" style="background: linear-gradient(to right, {gradient})"></div>

@@ -140,6 +140,25 @@ class ExchangeEdge(BaseModel):
     )
 
 
+class BulkZoneData(BaseModel):
+    """One zone's forecast + recent history, for the bulk startup endpoint."""
+
+    forecast: ForecastPayload | None = Field(
+        default=None, description="Null if this zone has no forecast yet."
+    )
+    history: list[HistoryPoint] = Field(default_factory=list)
+
+
+class BulkResponse(BaseModel):
+    """Every published zone's forecast + recent history in one response.
+
+    Lets the frontend fetch all zones' startup data in a single round trip
+    instead of firing 2 requests per zone -- see GET /api/bulk.
+    """
+
+    zones: dict[str, BulkZoneData]
+
+
 class ExchangesPayload(BaseModel):
     """Latest cross-border flow snapshot across the whole flow-tracing network."""
 
