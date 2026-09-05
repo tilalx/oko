@@ -17,6 +17,8 @@ repos:
           - types-xmltodict
           - httpx
           - structlog
+          - fastapi>=0.141.1
+          - limits>=3.0
         args: [--strict]
         files: ^src/
 
@@ -36,6 +38,7 @@ repos:
     hooks:
       # General
       - id: check-json
+        exclude: ^frontend/tsconfig.*\.json$
       - id: check-yaml
       - id: check-toml
       - id: check-xml
@@ -50,7 +53,7 @@ repos:
 
       # Validate JSON formatting
       - id: pretty-format-json
-        exclude: (^|/)(package\.json|package-lock\.json)$
+        exclude: (^|/)(package\.json|package-lock\.json)$|^frontend/tsconfig.*\.json$
         args:
           - --autofix
           - --indent
