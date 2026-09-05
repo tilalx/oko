@@ -1,0 +1,49 @@
+version: 2
+updates:
+  # Python dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    pull-request-branch-name:
+      separator: "/"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # Node/npm dependencies (frontend)
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    pull-request-branch-name:
+      separator: "/"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # Docker
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    pull-request-branch-name:
+      separator: "/"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # Pre-commit hooks
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    pull-request-branch-name:
+      separator: "/"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
