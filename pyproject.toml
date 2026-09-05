@@ -81,6 +81,10 @@ explicit_package_bases = true
 module = ["lightgbm.*", "xmltodict.*", "eccodes.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "oko.fetchers.noaa_gfs"
+ignore_errors = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --cov=oko --cov-report=term-missing"

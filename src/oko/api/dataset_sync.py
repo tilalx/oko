@@ -1,20 +1,14 @@
 """Sync published data from `oko-dataset` straight into the container.
 
-Replaces the host-side `git clone` + cron `git pull` + read-only bind mount
-described in README's "Deployment" section: `oko-serve` downloads
-`oko.sqlite3`, each zone's `forecast_*.json`, and `exchanges.json` directly
-from the (public) dataset repo's raw file URLs on a schedule, so no volume
-is needed at all. See `app.py`'s `lifespan` for how this gets scheduled.
-
-Only plain `raw.githubusercontent.com` GETs are used — never the
-`api.github.com` Contents API — because the zone set is already known
-statically (`FLOW_TRACING_ZONES`), so there's nothing to list, and raw file
-downloads aren't subject to the unauthenticated API's 60 requests/hour quota.
+Clones the dataset repo with Git LFS support to properly resolve LFS-tracked
+files (oko.sqlite3, forecast_*.json). See `app.py`'s `lifespan` for how
+this gets scheduled on container startup.
 """
 
 from __future__ import annotations
 
-import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -25,8 +19,6 @@ from oko.config import FLOW_TRACING_ZONES, TARGET_ZONE, Settings
 from oko.history import reset_query_connection
 
 logger = structlog.get_logger(__name__)
-
-RAW_BASE = "https://raw.githubusercontent.com"
 
 
 def _forecast_filename(zone: str) -> str:
@@ -46,43 +38,57 @@ def _dataset_files(settings: Settings) -> dict[str, Path]:
     return files
 
 
-async def _download_one(
-    client: httpx.AsyncClient, settings: Settings, name: str, target: Path
-) -> None:
-    url = f"{RAW_BASE}/{settings.dataset_repo}/{settings.dataset_ref}/{name}"
-    try:
-        response = await client.get(url, timeout=settings.http_timeout_seconds)
-    except httpx.HTTPError as exc:
-        logger.warning("dataset_sync.fetch_failed", file=name, error=str(exc))
-        return
-
-    if response.status_code == 404:
-        logger.debug("dataset_sync.not_published_yet", file=name)
-        return
-    if response.status_code != 200:
-        logger.warning("dataset_sync.unexpected_status", file=name, status=response.status_code)
-        return
-
-    content = response.content
-    if target.exists() and target.read_bytes() == content:
-        return
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-        os.replace(tmp_name, target)
-    except BaseException:
-        os.unlink(tmp_name)
-        raise
-
-    logger.info("dataset_sync.updated", file=name, bytes=len(content))
-    if target == settings.sqlite_path:
-        reset_query_connection()
-
-
 async def sync_dataset(settings: Settings, client: httpx.AsyncClient) -> None:
-    """Fetch every published dataset file that's newer than what's on disk."""
-    for name, target in _dataset_files(settings).items():
-        await _download_one(client, settings, name, target)
+    """Clone dataset repo with Git LFS and copy files to their targets."""
+    repo_url = f"https://github.com/{settings.dataset_repo}.git"
+    target_files = _dataset_files(settings)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_path = Path(tmpdir) / "dataset"
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    settings.dataset_ref,
+                    repo_url,
+                    str(repo_path),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo_path), "lfs", "install", "--local"],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo_path), "lfs", "pull"],
+                check=True,
+                capture_output=True,
+                timeout=300,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            logger.warning("dataset_sync.clone_failed", error=str(exc))
+            return
+
+        for name, target in target_files.items():
+            source = repo_path / name
+            if not source.exists():
+                logger.debug("dataset_sync.file_not_found", file=name)
+                continue
+
+            content = source.read_bytes()
+            if target.exists() and target.read_bytes() == content:
+                continue
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            logger.info("dataset_sync.updated", file=name, bytes=len(content))
+            if target == settings.sqlite_path:
+                reset_query_connection()
