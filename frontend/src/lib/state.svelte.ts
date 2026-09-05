@@ -46,7 +46,7 @@ class OkoState {
   zoneBoundaryPoints = $state<Record<string, [number, number][]>>({})
   exchangesData = $state<ExchangeEdge[]>([])
 
-  flowLinesVisible = $state(true)
+  flowLinesVisible = $state(false)
   /** Absolute scrub position, as an epoch-ms timestamp -- meaningful
    * identically across every zone, unlike an index into a zone-specific
    * array (whose length varies with how gappy that zone's ENTSO-E history
