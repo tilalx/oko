@@ -8,6 +8,7 @@ this gets scheduled on container startup.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import os
 import shutil
 import subprocess
@@ -93,23 +94,32 @@ async def sync_dataset(settings: Settings, client: httpx.AsyncClient) -> None:
     target_files = _dataset_files(settings)
     repo_path = settings.data_dir / ".dataset-cache"
 
-    try:
-        if (repo_path / ".git").exists():
-            try:
-                _fetch(settings.dataset_ref, repo_path)
-            except (subprocess.CalledProcessError, FileNotFoundError):
+    # The cache dir is shared across serve's worker processes -- serialize
+    # clone/fetch/lfs-pull with a cross-process lock so concurrent workers
+    # don't race to clone into the same directory on startup.
+    repo_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = repo_path.parent / ".dataset-sync.lock"
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            if (repo_path / ".git").exists():
+                try:
+                    _fetch(settings.dataset_ref, repo_path)
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    _clone(repo_url, settings.dataset_ref, repo_path)
+            else:
                 _clone(repo_url, settings.dataset_ref, repo_path)
-        else:
-            _clone(repo_url, settings.dataset_ref, repo_path)
-        subprocess.run(
-            ["git", "-C", str(repo_path), "lfs", "pull"],
-            check=True,
-            capture_output=True,
-            timeout=300,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        logger.warning("dataset_sync.clone_failed", error=str(exc))
-        return
+            subprocess.run(
+                ["git", "-C", str(repo_path), "lfs", "pull"],
+                check=True,
+                capture_output=True,
+                timeout=300,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            logger.warning("dataset_sync.clone_failed", error=str(exc))
+            return
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     for name, target in target_files.items():
         source = repo_path / name
