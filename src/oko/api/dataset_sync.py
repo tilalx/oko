@@ -161,9 +161,20 @@ def _sync_dataset_blocking(settings: Settings) -> None:
                     ["git", "-C", str(repo_path), "lfs", "pull"],
                     check=True,
                     capture_output=True,
-                    timeout=300,
+                    timeout=600,
                 )
-            except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                FileNotFoundError,
+            ) as exc:
+                # A slow/unreachable GitHub, or a multi-GB LFS transfer that
+                # just hasn't finished in time, must not crash the whole
+                # app -- this previously escaped uncaught as
+                # subprocess.TimeoutExpired, taking down the entire
+                # container on every slow sync. Leave whatever's already on
+                # disk from the last successful sync in place and retry on
+                # the next tick.
                 logger.warning("dataset_sync.clone_failed", error=str(exc))
                 return
             _prune(repo_path)

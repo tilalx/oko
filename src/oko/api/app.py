@@ -28,6 +28,7 @@ import httpx
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from limits import parse
@@ -72,7 +73,21 @@ def _seconds_until_next_boundary(interval_seconds: float) -> float:
 
 
 async def _dataset_sync_loop(settings: Settings) -> None:
-    """Re-sync the dataset on a fixed wall-clock cadence until cancelled."""
+    """Sync the dataset once immediately, then on a fixed wall-clock cadence.
+
+    Runs as a background task rather than being awaited before `yield` in
+    `lifespan` -- a cold clone + LFS pull of a multi-GB, frequently-updated
+    dataset can take minutes, and blocking startup on it means the whole
+    server (including `/healthz`) is unreachable for that whole window on
+    every restart. Serving with no data yet already degrades gracefully
+    (`_get_export_with_cache` returns 503), which is far better than an
+    unresponsive container.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            await sync_dataset(settings, client)
+    except Exception:
+        logger.exception("dataset_sync.tick_failed")
     async with httpx.AsyncClient() as client:
         while True:
             interval = settings.dataset_sync_interval_seconds
@@ -85,12 +100,10 @@ async def _dataset_sync_loop(settings: Settings) -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """On startup, bootstrap the dataset and start syncing it periodically."""
+    """Start syncing the dataset in the background, without gating startup on it."""
     settings = get_settings()
     sync_task: asyncio.Task[None] | None = None
     if settings.dataset_sync_enabled:
-        async with httpx.AsyncClient() as client:
-            await sync_dataset(settings, client)
         sync_task = asyncio.create_task(_dataset_sync_loop(settings))
     try:
         yield
@@ -111,6 +124,10 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["GET", "OPTIONS"],
 )
+# /api/bulk in particular can run into the tens of MB (every zone's
+# forecast + history in one JSON response) -- gzip cuts that transfer
+# size by roughly 5-10x for free, since JSON compresses very well.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
