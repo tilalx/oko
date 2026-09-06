@@ -8,9 +8,9 @@ this gets scheduled on container startup.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import httpx
@@ -39,60 +39,93 @@ def _dataset_files(settings: Settings) -> dict[str, Path]:
     return files
 
 
+# Checkout operations (clone, reset --hard) run the LFS smudge filter inline,
+# which would try to download the (multi-GB) LFS content synchronously and
+# blow past these commands' short timeouts. Skip smudging here and let the
+# dedicated `git lfs pull` step (its own, longer timeout) fetch the content.
+_NO_SMUDGE_ENV = {**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"}
+
+
+def _clone(repo_url: str, ref: str, repo_path: Path) -> None:
+    shutil.rmtree(repo_path, ignore_errors=True)
+    repo_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--branch", ref, repo_url, str(repo_path)],
+        check=True,
+        capture_output=True,
+        timeout=60,
+        env=_NO_SMUDGE_ENV,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_path), "lfs", "install", "--local"],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+
+def _fetch(ref: str, repo_path: Path) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo_path), "fetch", "--depth", "1", "origin", ref],
+        check=True,
+        capture_output=True,
+        timeout=240,
+        env=_NO_SMUDGE_ENV,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_path), "reset", "--hard", "FETCH_HEAD"],
+        check=True,
+        capture_output=True,
+        timeout=30,
+        env=_NO_SMUDGE_ENV,
+    )
+
+
 async def sync_dataset(settings: Settings, client: httpx.AsyncClient) -> None:
-    """Clone dataset repo with Git LFS and copy files to their targets."""
+    """Update the local dataset checkout (with Git LFS) and copy files to their targets.
+
+    Reuses a persistent local clone (`settings.data_dir / ".dataset-cache"`)
+    across calls instead of a throwaway tempdir, so `git`/`git lfs` only
+    transfer objects that actually changed since the last sync -- not the
+    full multi-GB LFS-tracked dataset on every tick.
+    """
     repo_url = f"https://github.com/{settings.dataset_repo}.git"
     target_files = _dataset_files(settings)
+    repo_path = settings.data_dir / ".dataset-cache"
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        repo_path = Path(tmpdir) / "dataset"
-        try:
-            subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "--depth",
-                    "1",
-                    "--branch",
-                    settings.dataset_ref,
-                    repo_url,
-                    str(repo_path),
-                ],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-            subprocess.run(
-                ["git", "-C", str(repo_path), "lfs", "install", "--local"],
-                check=True,
-                capture_output=True,
-                timeout=30,
-            )
-            subprocess.run(
-                ["git", "-C", str(repo_path), "lfs", "pull"],
-                check=True,
-                capture_output=True,
-                timeout=300,
-            )
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            logger.warning("dataset_sync.clone_failed", error=str(exc))
-            return
+    try:
+        if (repo_path / ".git").exists():
+            try:
+                _fetch(settings.dataset_ref, repo_path)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                _clone(repo_url, settings.dataset_ref, repo_path)
+        else:
+            _clone(repo_url, settings.dataset_ref, repo_path)
+        subprocess.run(
+            ["git", "-C", str(repo_path), "lfs", "pull"],
+            check=True,
+            capture_output=True,
+            timeout=300,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        logger.warning("dataset_sync.clone_failed", error=str(exc))
+        return
 
-        for name, target in target_files.items():
-            source = repo_path / name
-            if not source.exists():
-                logger.debug("dataset_sync.file_not_found", file=name)
-                continue
+    for name, target in target_files.items():
+        source = repo_path / name
+        if not source.exists():
+            logger.debug("dataset_sync.file_not_found", file=name)
+            continue
 
-            content = source.read_bytes()
-            if target.exists() and target.read_bytes() == content:
-                continue
+        content = source.read_bytes()
+        if target.exists() and target.read_bytes() == content:
+            continue
 
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            logger.info("dataset_sync.updated", file=name, bytes=len(content))
-            if target == settings.sqlite_path:
-                reset_query_connection()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        logger.info("dataset_sync.updated", file=name, bytes=len(content))
+        if target == settings.sqlite_path:
+            reset_query_connection()
 
 
 async def _main() -> None:
