@@ -118,6 +118,7 @@ def load_installed_capacity(path: Path, zone: str) -> dict[str, float]:
     """Load a zone's cached installed capacity per category, MW. Empty if never fetched."""
     if not path.exists():
         return {}
+    init_db(path)  # tolerate a DB file whose schema predates this table
     with sqlite3.connect(path) as conn:
         rows = conn.execute(
             "SELECT category, capacity_mw FROM installed_capacity WHERE zone = ?", (zone,)
@@ -129,6 +130,7 @@ def installed_capacity_fetched_at(path: Path, zone: str) -> dt.datetime | None:
     """Return when ``zone``'s installed capacity was last fetched, or ``None`` if never."""
     if not path.exists():
         return None
+    init_db(path)  # tolerate a DB file whose schema predates this table
     with sqlite3.connect(path) as conn:
         row = conn.execute(
             "SELECT fetched_at FROM installed_capacity WHERE zone = ? "

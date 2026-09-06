@@ -338,6 +338,19 @@ def test_installed_capacity_fetched_at_on_nonexistent_db_returns_none(tmp_path: 
     assert installed_capacity_fetched_at(tmp_path / "missing.sqlite3", "DE-LU") is None
 
 
+def test_load_installed_capacity_migrates_a_pre_existing_db_without_the_table(
+    tmp_path: Path,
+) -> None:
+    # A DB file that predates the installed_capacity table (e.g. a
+    # production DB from before this migration) must be tolerated, not
+    # raise sqlite3.OperationalError: no such table.
+    db_path = tmp_path / "history.sqlite3"
+    _create_legacy_table(db_path)
+
+    assert load_installed_capacity(db_path, "DE-LU") == {}
+    assert installed_capacity_fetched_at(db_path, "DE-LU") is None
+
+
 def test_upsert_and_load_installed_capacity_round_trip(tmp_path: Path) -> None:
     db_path = tmp_path / "history.sqlite3"
     fetched_at = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
