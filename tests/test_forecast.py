@@ -108,6 +108,10 @@ def test_feature_columns_matches_as_dict_keys() -> None:
     )
     assert tuple(row.as_dict().keys()) == features.PRICE_FEATURE_COLUMNS
     assert tuple(row.as_dict().keys())[: len(features.FEATURE_COLUMNS)] == features.FEATURE_COLUMNS
+    assert (
+        tuple(row.as_dict().keys())[: len(features.CARBON_FEATURE_COLUMNS)]
+        == features.CARBON_FEATURE_COLUMNS
+    )
 
 
 def test_build_training_features_joins_and_skips_missing_hours() -> None:
@@ -125,6 +129,17 @@ def test_build_training_features_joins_and_skips_missing_hours() -> None:
     assert all(r.horizon_hours == 0 for r in rows)
     assert rows[0].residual_load_share == pytest.approx(0.7)
     assert rows[1].residual_load_share == pytest.approx(0.9)
+
+
+def test_build_training_features_populates_wind_and_solar_shares() -> None:
+    hour0 = HOUR
+    production = {hour0: {"wind": 300.0, "solar": 100.0, "coal": 600.0}}
+    load = {hour0: 1000.0}
+
+    [row] = features.build_training_features(production, load)
+
+    assert row.wind_share == pytest.approx(0.3)
+    assert row.solar_share == pytest.approx(0.1)
 
 
 def test_build_forecast_features_computes_horizon_and_sorts() -> None:
@@ -149,6 +164,19 @@ def test_build_forecast_features_computes_horizon_and_sorts() -> None:
         HOUR + dt.timedelta(hours=1),
         HOUR + dt.timedelta(hours=2),
     ]
+
+
+def test_build_forecast_features_populates_wind_and_solar_shares() -> None:
+    point = WeatherPoint(
+        valid_time=HOUR + dt.timedelta(hours=1),
+        wind_speed_10m_ms=features.WIND_SATURATION_MS,
+        dswrf_wm2=0.0,
+        temperature_2m_c=15.0,
+    )
+    [row] = features.build_forecast_features([point], HOUR)
+
+    assert row.wind_share == pytest.approx(1.0)
+    assert row.solar_share == pytest.approx(0.0)
 
 
 def test_with_price_lag_fills_from_matching_hour() -> None:
@@ -192,6 +220,140 @@ def test_with_price_lag_leaves_none_when_hour_missing() -> None:
     assert math.isnan(lagged.as_dict()["price_lag_168h"])
 
 
+def test_with_intensity_lag_fills_from_matching_hour() -> None:
+    row = features.FeatureRow(
+        timestamp=HOUR,
+        hour_sin=0.1,
+        hour_cos=0.2,
+        dow_sin=0.3,
+        dow_cos=0.4,
+        month_sin=0.5,
+        month_cos=0.6,
+        residual_load_share=0.7,
+        horizon_hours=0,
+    )
+    intensity_by_hour = {HOUR - dt.timedelta(hours=features.INTENSITY_LAG_HOURS): 300.0}
+
+    [lagged] = features.with_intensity_lag([row], intensity_by_hour)
+
+    assert lagged.intensity_lag_168h == 300.0
+    assert lagged.timestamp == row.timestamp
+    assert lagged.residual_load_share == row.residual_load_share
+
+
+def test_with_intensity_lag_leaves_none_when_hour_missing() -> None:
+    row = features.FeatureRow(
+        timestamp=HOUR,
+        hour_sin=0.1,
+        hour_cos=0.2,
+        dow_sin=0.3,
+        dow_cos=0.4,
+        month_sin=0.5,
+        month_cos=0.6,
+        residual_load_share=0.7,
+        horizon_hours=0,
+    )
+
+    [lagged] = features.with_intensity_lag([row], {})
+
+    assert lagged.intensity_lag_168h is None
+    assert math.isnan(lagged.as_dict()["intensity_lag_168h"])
+
+
+def test_with_intensity_lag_fills_24h_lag_from_matching_hour() -> None:
+    row = features.FeatureRow(
+        timestamp=HOUR,
+        hour_sin=0.1,
+        hour_cos=0.2,
+        dow_sin=0.3,
+        dow_cos=0.4,
+        month_sin=0.5,
+        month_cos=0.6,
+        residual_load_share=0.7,
+        horizon_hours=0,
+    )
+    intensity_by_hour = {HOUR - dt.timedelta(hours=features.INTENSITY_LAG_HOURS_SHORT): 250.0}
+
+    [lagged] = features.with_intensity_lag([row], intensity_by_hour)
+
+    assert lagged.intensity_lag_24h == 250.0
+
+
+def test_with_intensity_lag_24h_none_when_hour_missing() -> None:
+    row = features.FeatureRow(
+        timestamp=HOUR,
+        hour_sin=0.1,
+        hour_cos=0.2,
+        dow_sin=0.3,
+        dow_cos=0.4,
+        month_sin=0.5,
+        month_cos=0.6,
+        residual_load_share=0.7,
+        horizon_hours=0,
+    )
+
+    [lagged] = features.with_intensity_lag([row], {})
+
+    assert lagged.intensity_lag_24h is None
+    assert math.isnan(lagged.as_dict()["intensity_lag_24h"])
+
+
+def test_with_intensity_lag_fills_both_lags_independently() -> None:
+    row = features.FeatureRow(
+        timestamp=HOUR,
+        hour_sin=0.1,
+        hour_cos=0.2,
+        dow_sin=0.3,
+        dow_cos=0.4,
+        month_sin=0.5,
+        month_cos=0.6,
+        residual_load_share=0.7,
+        horizon_hours=0,
+    )
+    intensity_by_hour = {
+        HOUR - dt.timedelta(hours=features.INTENSITY_LAG_HOURS_SHORT): 250.0,
+        HOUR - dt.timedelta(hours=features.INTENSITY_LAG_HOURS): 300.0,
+    }
+
+    [lagged] = features.with_intensity_lag([row], intensity_by_hour)
+
+    assert lagged.intensity_lag_24h == 250.0
+    assert lagged.intensity_lag_168h == 300.0
+
+
+def test_residual_load_share_from_weather_temperature_none_unchanged() -> None:
+    without_temp = features.residual_load_share_from_weather(5.0, 200.0)
+    with_none_temp = features.residual_load_share_from_weather(5.0, 200.0, temperature_2m_c=None)
+    assert without_temp == pytest.approx(with_none_temp)
+
+
+def test_residual_load_share_from_weather_cold_raises_share() -> None:
+    baseline = features.residual_load_share_from_weather(5.0, 200.0)
+    cold = features.residual_load_share_from_weather(5.0, 200.0, temperature_2m_c=-5.0)
+    assert cold > baseline
+
+
+def test_residual_load_share_from_weather_hot_raises_share() -> None:
+    baseline = features.residual_load_share_from_weather(5.0, 200.0)
+    hot = features.residual_load_share_from_weather(5.0, 200.0, temperature_2m_c=35.0)
+    assert hot > baseline
+
+
+def test_residual_load_share_from_weather_at_balance_point_unchanged() -> None:
+    baseline = features.residual_load_share_from_weather(5.0, 200.0)
+    at_balance = features.residual_load_share_from_weather(
+        5.0, 200.0, temperature_2m_c=features.TEMPERATURE_BALANCE_POINT_C
+    )
+    assert at_balance == pytest.approx(baseline)
+
+
+def test_residual_load_share_from_weather_temperature_adjustment_is_bounded() -> None:
+    extreme_cold = features.residual_load_share_from_weather(
+        features.WIND_SATURATION_MS, features.DSWRF_SATURATION_WM2, temperature_2m_c=-100.0
+    )
+    assert extreme_cold <= 1.0
+
+
 # --------------------------------------------------------------------------
 # model.py
 # --------------------------------------------------------------------------
@@ -205,12 +367,46 @@ def test_confidence_for_horizon(horizon: int, expected: str) -> None:
     assert model.confidence_for_horizon(horizon) == expected
 
 
+def test_derive_confidence_thresholds_empty() -> None:
+    assert backtest.derive_confidence_thresholds([]) is None
+
+
+def test_derive_confidence_thresholds_model_never_beats_naive() -> None:
+    metrics = [
+        backtest.DayMetric(day=1, model_mae=100.0, naive_mae=90.0, n=10),
+        backtest.DayMetric(day=2, model_mae=110.0, naive_mae=100.0, n=10),
+    ]
+    assert backtest.derive_confidence_thresholds(metrics) is None
+
+
+def test_derive_confidence_thresholds_clear_degradation() -> None:
+    metrics = [
+        backtest.DayMetric(day=1, model_mae=50.0, naive_mae=100.0, n=24),
+        backtest.DayMetric(day=2, model_mae=60.0, naive_mae=100.0, n=24),
+        backtest.DayMetric(day=3, model_mae=85.0, naive_mae=100.0, n=24),
+        backtest.DayMetric(day=4, model_mae=95.0, naive_mae=100.0, n=24),
+    ]
+    high, medium = backtest.derive_confidence_thresholds(metrics)
+    assert medium == 4 * backtest.HOURS_PER_DAY
+    assert high in (2 * backtest.HOURS_PER_DAY, 3 * backtest.HOURS_PER_DAY)
+
+
 def test_confidence_for_horizon_accepts_custom_thresholds() -> None:
-    # A caller with measured per-horizon error (e.g. from a backtest) can
-    # override the default fixed 24h/72h buckets.
     assert model.confidence_for_horizon(10, high_max_hours=6, medium_max_hours=20) == "medium"
     assert model.confidence_for_horizon(6, high_max_hours=6, medium_max_hours=20) == "high"
     assert model.confidence_for_horizon(21, high_max_hours=6, medium_max_hours=20) == "low"
+
+
+def test_carbon_model_predict_respects_custom_thresholds() -> None:
+    rows, targets = _synthetic_rows(50)
+    trained = model.CarbonIntensityModel.train(rows, targets)
+    query_row = dataclasses.replace(rows[0], horizon_hours=20)
+
+    default_pred = trained.predict([query_row])[0]
+    assert default_pred.confidence in ("high", "medium", "low")
+
+    custom_pred = trained.predict([query_row], high_max_hours=10, medium_max_hours=15)[0]
+    assert custom_pred.confidence == "low"
 
 
 def _synthetic_rows(n: int) -> tuple[list[features.FeatureRow], list[float]]:
@@ -233,6 +429,32 @@ def _synthetic_rows(n: int) -> tuple[list[features.FeatureRow], list[float]]:
         )
         targets.append(100.0 + share * 500.0)
     return rows, targets
+
+
+def test_scaled_lgb_params_small_dataset_uses_default_bounds() -> None:
+    params = model._scaled_lgb_params(100)
+    assert params["num_leaves"] == 15
+    assert params["min_data_in_leaf"] == 20
+
+
+def test_scaled_lgb_params_increases_capacity_with_more_rows() -> None:
+    small = model._scaled_lgb_params(24 * 30)
+    medium = model._scaled_lgb_params(24 * 180)
+    large = model._scaled_lgb_params(24 * 400)
+
+    assert medium["num_leaves"] > small["num_leaves"]
+    assert large["num_leaves"] > medium["num_leaves"]
+    assert medium["min_data_in_leaf"] >= small["min_data_in_leaf"]
+    assert large["min_data_in_leaf"] >= medium["min_data_in_leaf"]
+
+
+def test_explicit_params_bypass_scaling() -> None:
+    rows, targets = _synthetic_rows(model.MIN_ROWS_FOR_EARLY_STOPPING - 1)
+    custom_params = {**model.DEFAULT_LGB_PARAMS, "num_leaves": 3}
+    trained = model.CarbonIntensityModel.train(rows, targets, params=custom_params)
+    # Just proving it doesn't raise and the explicit params path still works;
+    # the booster internals aren't otherwise inspectable from here.
+    assert trained.predict(rows[:1])[0].value_g_per_kwh >= 0.0
 
 
 def test_train_rejects_mismatched_lengths() -> None:
@@ -280,6 +502,43 @@ def test_train_predict_learns_the_relationship() -> None:
     assert predictions[0].confidence == "high"
 
 
+def test_train_predict_uses_intensity_lag_feature() -> None:
+    # residual_load_share is noise, uncorrelated with the target -- the
+    # only learnable signal is intensity_lag_168h. If the model actually
+    # uses CARBON_FEATURE_COLUMNS (which includes the lag), it must pick
+    # up on this; if the lag were silently ignored, predictions would be
+    # roughly constant regardless of the lag value.
+    rows = []
+    targets = []
+    for i in range(300):
+        lag_value = 100.0 + (i % 20) * 20.0
+        rows.append(
+            dataclasses.replace(
+                features.FeatureRow(
+                    timestamp=HOUR + dt.timedelta(hours=i),
+                    hour_sin=math.sin(i),
+                    hour_cos=math.cos(i),
+                    dow_sin=0.0,
+                    dow_cos=0.0,
+                    month_sin=0.0,
+                    month_cos=0.0,
+                    residual_load_share=0.5,
+                    horizon_hours=0,
+                ),
+                intensity_lag_168h=lag_value,
+            )
+        )
+        targets.append(lag_value)
+
+    trained = model.CarbonIntensityModel.train(rows, targets)
+
+    low_lag_row = dataclasses.replace(rows[0], intensity_lag_168h=100.0, horizon_hours=1)
+    high_lag_row = dataclasses.replace(rows[0], intensity_lag_168h=480.0, horizon_hours=1)
+    predictions = trained.predict([low_lag_row, high_lag_row])
+
+    assert predictions[0].value_g_per_kwh < predictions[1].value_g_per_kwh
+
+
 def test_predict_clamps_negative_predictions_to_zero() -> None:
     class _StubBooster:
         def predict(self, matrix: object) -> list[float]:
@@ -315,6 +574,103 @@ def test_save_load_roundtrip_produces_identical_predictions(tmp_path: Path) -> N
     after = loaded.predict([query_row])[0].value_g_per_kwh
 
     assert before == pytest.approx(after)
+
+
+def test_train_defaults_to_log_target() -> None:
+    rows, targets = _synthetic_rows(300)
+    trained = model.CarbonIntensityModel.train(rows, targets)
+    assert trained._log_target is True
+
+
+def test_log_target_predictions_are_sane_and_non_negative() -> None:
+    rows, targets = _synthetic_rows(300)
+    trained = model.CarbonIntensityModel.train(rows, targets, log_target=True)
+
+    predictions = trained.predict(rows[:5])
+
+    assert all(p.value_g_per_kwh >= 0.0 for p in predictions)
+    # Predicted values should stay in a sane range relative to the
+    # training targets, not blow up from a mishandled expm1 inversion.
+    assert all(p.value_g_per_kwh < max(targets) * 2 for p in predictions)
+
+
+def test_log_target_false_is_still_supported() -> None:
+    rows, targets = _synthetic_rows(300)
+    trained = model.CarbonIntensityModel.train(rows, targets, log_target=False)
+    assert trained._log_target is False
+    predictions = trained.predict(rows[:5])
+    assert all(p.value_g_per_kwh >= 0.0 for p in predictions)
+
+
+def test_save_load_roundtrip_preserves_log_target_flag(tmp_path: Path) -> None:
+    rows, targets = _synthetic_rows(300)
+    trained = model.CarbonIntensityModel.train(rows, targets, log_target=True)
+    query_row = dataclasses.replace(rows[0], horizon_hours=10)
+    before = trained.predict([query_row])[0].value_g_per_kwh
+
+    save_path = tmp_path / "model.txt"
+    trained.save(save_path)
+    loaded = model.CarbonIntensityModel.load(save_path)
+
+    assert loaded._log_target is True
+    after = loaded.predict([query_row])[0].value_g_per_kwh
+    assert before == pytest.approx(after)
+
+
+def test_load_without_meta_sidecar_defaults_log_target_false(tmp_path: Path) -> None:
+    rows, targets = _synthetic_rows(300)
+    trained = model.CarbonIntensityModel.train(rows, targets, log_target=False)
+    save_path = tmp_path / "model.txt"
+    trained.save(save_path)
+    save_path.with_suffix(save_path.suffix + ".meta.json").unlink()  # simulate a legacy model
+
+    loaded = model.CarbonIntensityModel.load(save_path)
+
+    assert loaded._log_target is False
+
+
+def test_recency_weights_newest_row_has_full_weight() -> None:
+    rows, _ = _synthetic_rows(100)
+    weights = model._recency_weights(rows)
+    assert weights[-1] == pytest.approx(1.0)
+
+
+def test_recency_weights_decay_with_age() -> None:
+    rows, _ = _synthetic_rows(100)
+    weights = model._recency_weights(rows)
+    assert weights[0] < weights[50] < weights[-1]
+
+
+def test_recency_weights_half_life() -> None:
+    origin = HOUR
+    half_life_hours = model.RECENCY_HALF_LIFE_DAYS * 24
+    rows = [
+        features.FeatureRow(
+            timestamp=origin,
+            hour_sin=0.0,
+            hour_cos=0.0,
+            dow_sin=0.0,
+            dow_cos=0.0,
+            month_sin=0.0,
+            month_cos=0.0,
+            residual_load_share=0.5,
+            horizon_hours=0,
+        ),
+        features.FeatureRow(
+            timestamp=origin + dt.timedelta(hours=half_life_hours),
+            hour_sin=0.0,
+            hour_cos=0.0,
+            dow_sin=0.0,
+            dow_cos=0.0,
+            month_sin=0.0,
+            month_cos=0.0,
+            residual_load_share=0.5,
+            horizon_hours=0,
+        ),
+    ]
+    weights = model._recency_weights(rows)
+    assert weights[0] == pytest.approx(0.5, rel=1e-6)
+    assert weights[1] == pytest.approx(1.0)
 
 
 def _synthetic_price_rows(n: int) -> tuple[list[features.FeatureRow], list[float]]:
@@ -432,6 +788,70 @@ def test_breakdown_model_predict_sums_to_100_and_covers_every_category() -> None
     # "solar" was never in any training breakdown -> its booster predicts ~0.
     assert percent["solar"] == pytest.approx(0.0, abs=1e-6)
     assert sum(percent.values()) == pytest.approx(100.0)
+
+
+def test_breakdown_model_predict_uses_breakdown_lag_feature() -> None:
+    # Every calendar/residual_load_share feature is held constant; wind's
+    # share ramps with a 24h period, and 168h (BREAKDOWN_LAG_HOURS) is an
+    # exact multiple of 24h, so wind[i-168] == wind[i] for i >= 168 --
+    # the *only* learnable signal for predicting wind's share is its own
+    # 168h-ago lag. If the lag column were silently ignored, predictions
+    # would be roughly constant regardless of the supplied history.
+    n = 300
+    rows = []
+    breakdowns = []
+    for i in range(n):
+        rows.append(
+            features.FeatureRow(
+                timestamp=HOUR + dt.timedelta(hours=i),
+                hour_sin=0.0,
+                hour_cos=0.0,
+                dow_sin=0.0,
+                dow_cos=0.0,
+                month_sin=0.0,
+                month_cos=0.0,
+                residual_load_share=0.5,
+                horizon_hours=0,
+            )
+        )
+        wind_share = 20.0 + 60.0 * ((i % 24) / 24.0)
+        breakdowns.append({"wind": wind_share, "coal": 100.0 - wind_share})
+
+    trained = model.BreakdownModel.train(rows, breakdowns, categories=("wind", "coal"))
+
+    target_timestamp = HOUR + dt.timedelta(hours=n + 1)
+    query_row = features.FeatureRow(
+        timestamp=target_timestamp,
+        hour_sin=0.0,
+        hour_cos=0.0,
+        dow_sin=0.0,
+        dow_cos=0.0,
+        month_sin=0.0,
+        month_cos=0.0,
+        residual_load_share=0.5,
+        horizon_hours=1,
+    )
+    lag_timestamp = target_timestamp - dt.timedelta(hours=168)
+    low_history = {lag_timestamp: {"wind": 20.0, "coal": 80.0}}
+    high_history = {lag_timestamp: {"wind": 75.0, "coal": 25.0}}
+
+    low_prediction = trained.predict([query_row], breakdown_history=low_history)[0]
+    high_prediction = trained.predict([query_row], breakdown_history=high_history)[0]
+
+    assert (
+        low_prediction.power_breakdown_percent["wind"]
+        < high_prediction.power_breakdown_percent["wind"]
+    )
+
+
+def test_breakdown_model_predict_without_history_defaults_to_nan_lag() -> None:
+    rows, breakdowns = _synthetic_breakdowns(200)
+    trained = model.BreakdownModel.train(rows, breakdowns, categories=("wind", "coal"))
+    query_row = dataclasses.replace(rows[0], horizon_hours=1)
+
+    # Must not raise despite no breakdown_history supplied.
+    predictions = trained.predict([query_row])
+    assert len(predictions) == 1
 
 
 def test_breakdown_model_save_load_roundtrip_produces_identical_predictions(

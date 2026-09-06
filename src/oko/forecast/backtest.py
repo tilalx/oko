@@ -60,6 +60,40 @@ def day_of_horizon(horizon_hours: int) -> int:
     return min((horizon_hours - 1) // HOURS_PER_DAY + 1, NUM_FORECAST_DAYS)
 
 
+def derive_confidence_thresholds(
+    day_metrics: Sequence[DayMetric],
+) -> tuple[int, int] | None:
+    """Derive (high_max_hours, medium_max_hours) from measured error growth.
+
+    Returns the hour cutoffs beyond which confidence should degrade based
+    on actual model-vs-naive error comparison:
+    - high_max_hours: last hour where model clearly beats naive (by 10%)
+    - medium_max_hours: last hour where model beats naive at all
+    Returns None if insufficient data (empty metrics or model never beats
+    naive), falling back to fixed defaults.
+    """
+    if not day_metrics:
+        return None
+
+    sorted_metrics = sorted(day_metrics, key=lambda d: d.day)
+    high_max_day = None
+    medium_max_day = None
+
+    for metric in sorted_metrics:
+        if metric.model_mae < metric.naive_mae:
+            medium_max_day = metric.day
+            if metric.model_mae < metric.naive_mae * 0.9:
+                high_max_day = metric.day
+
+    if medium_max_day is None:
+        return None
+
+    high_max_hours = (high_max_day * HOURS_PER_DAY) if high_max_day else 0
+    medium_max_hours = medium_max_day * HOURS_PER_DAY
+
+    return high_max_hours, medium_max_hours
+
+
 def walk_forward_backtest(
     model: CarbonIntensityModel,
     actual_series: Mapping[dt.datetime, float],

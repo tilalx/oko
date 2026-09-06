@@ -13,7 +13,7 @@ from typing import Literal
 
 import structlog
 
-from oko.forecast.features import FeatureRow, with_price_lag
+from oko.forecast.features import FeatureRow, with_intensity_lag, with_price_lag
 
 logger = structlog.get_logger(__name__)
 
@@ -220,7 +220,14 @@ def _feature_row_from_columns(
 def load_training_rows(
     path: Path, zone: str, *, target: Literal["direct", "lifecycle"] = "direct"
 ) -> tuple[list[FeatureRow], list[float]]:
-    """Load historical features and intensity targets for training."""
+    """Load historical features and intensity targets for training.
+
+    Each row's ``intensity_lag_168h`` is filled from this same target
+    series (see ``oko.forecast.features.with_intensity_lag``) -- the
+    "direct" model gets a direct-intensity lag, the "lifecycle" model
+    gets a lifecycle-intensity lag, matching whichever target it trains
+    on.
+    """
     if not path.exists():
         return [], []
     init_db(path)  # tolerate a DB file whose schema predates a later migration column
@@ -240,6 +247,7 @@ def load_training_rows(
 
     rows = []
     targets = []
+    intensity_by_hour: dict[dt.datetime, float] = {}
     for (
         timestamp_iso,
         hour_sin,
@@ -251,20 +259,20 @@ def load_training_rows(
         residual_load_share,
         target_value,
     ) in result:
-        rows.append(
-            _feature_row_from_columns(
-                timestamp_iso,
-                hour_sin,
-                hour_cos,
-                dow_sin,
-                dow_cos,
-                month_sin,
-                month_cos,
-                residual_load_share,
-            )
+        feature_row = _feature_row_from_columns(
+            timestamp_iso,
+            hour_sin,
+            hour_cos,
+            dow_sin,
+            dow_cos,
+            month_sin,
+            month_cos,
+            residual_load_share,
         )
+        rows.append(feature_row)
         targets.append(target_value)
-    return rows, targets
+        intensity_by_hour[feature_row.timestamp] = target_value
+    return with_intensity_lag(rows, intensity_by_hour), targets
 
 
 def load_price_training_rows(path: Path, zone: str) -> tuple[list[FeatureRow], list[float]]:
@@ -473,3 +481,58 @@ def load_recent_prices(path: Path, zone: str, since: dt.datetime) -> dict[dt.dat
         (zone, since.isoformat()),
     )
     return {dt.datetime.fromisoformat(str(timestamp_iso)): price for timestamp_iso, price in cursor}
+
+
+def load_recent_intensity(
+    path: Path, zone: str, since: dt.datetime, *, target: Literal["direct", "lifecycle"] = "direct"
+) -> dict[dt.datetime, float]:
+    """Load a zone's observed carbon intensity since a given time, keyed by hour.
+
+    Used at inference time to fill ``intensity_lag_168h`` (see
+    ``oko.forecast.features.with_intensity_lag``) from intensity already
+    persisted in ``intensity_history`` — the lag always points at a past,
+    already-observed hour, never one still ahead of ``now``.
+    """
+    if not path.exists():
+        return {}
+    target_column = "target_g_per_kwh" if target == "direct" else "lifecycle_g_per_kwh"
+    conn = _get_query_connection(path)
+    cursor = conn.execute(
+        f"""
+        SELECT timestamp, {target_column}
+        FROM intensity_history
+        WHERE zone = ? AND timestamp >= ? AND {target_column} IS NOT NULL
+        ORDER BY timestamp ASC
+        """,
+        (zone, since.isoformat()),
+    )
+    return {dt.datetime.fromisoformat(str(timestamp_iso)): value for timestamp_iso, value in cursor}
+
+
+def load_recent_breakdowns(
+    path: Path, zone: str, since: dt.datetime
+) -> dict[dt.datetime, dict[str, float]]:
+    """Load a zone's observed power-mix breakdown since a given time, keyed by hour.
+
+    Used at inference time to fill each category's
+    ``oko.forecast.model.BREAKDOWN_LAG_HOURS`` autocorrelation feature
+    (see ``oko.forecast.model.BreakdownModel.predict``) from breakdowns
+    already persisted in ``intensity_history`` — the lag always points at
+    a past, already-observed hour, never one still ahead of ``now``.
+    """
+    if not path.exists():
+        return {}
+    conn = _get_query_connection(path)
+    cursor = conn.execute(
+        """
+        SELECT timestamp, breakdown_percent_json
+        FROM intensity_history
+        WHERE zone = ? AND timestamp >= ? AND breakdown_percent_json IS NOT NULL
+        ORDER BY timestamp ASC
+        """,
+        (zone, since.isoformat()),
+    )
+    return {
+        dt.datetime.fromisoformat(str(timestamp_iso)): json.loads(breakdown_json)
+        for timestamp_iso, breakdown_json in cursor
+    }

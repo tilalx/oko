@@ -40,6 +40,8 @@ services:
     environment:
       SQLITE_PATH: /output/oko.sqlite3
     profiles: ["serve"]
+    volumes:
+      - oko-data:/output
 
 volumes:
   oko-data:

@@ -34,19 +34,31 @@ from oko.export import (
     write_json,
 )
 from oko.fetchers import entsoe, noaa_gfs
+from oko.forecast import backtest
 from oko.forecast.features import (
+    INTENSITY_LAG_HOURS,
     PRICE_LAG_HOURS,
     build_forecast_features,
     build_training_features,
+    with_intensity_lag,
     with_price_lag,
 )
-from oko.forecast.model import BreakdownModel, CarbonIntensityModel, Prediction, PriceModel
+from oko.forecast.model import (
+    BREAKDOWN_LAG_HOURS,
+    VALIDATION_FRACTION,
+    BreakdownModel,
+    CarbonIntensityModel,
+    Prediction,
+    PriceModel,
+)
 from oko.history import (
     HistoryRow,
     installed_capacity_fetched_at,
     load_breakdown_training_rows,
     load_installed_capacity,
     load_price_training_rows,
+    load_recent_breakdowns,
+    load_recent_intensity,
     load_recent_prices,
     load_training_rows,
     upsert_installed_capacity,
@@ -339,6 +351,42 @@ async def _run_zone(
     direct_model = CarbonIntensityModel.train(training_rows, training_targets)
     direct_model.save(model_dir / "direct.txt")
 
+    day_metrics = None
+    high_max_hours = None
+    medium_max_hours = None
+    if len(training_rows) >= backtest.HOURS_PER_DAY:
+        split = max(1, int(len(training_rows) * (1 - VALIDATION_FRACTION)))
+        holdout_rows = training_rows[split:]
+        holdout_targets = training_targets[split:]
+        actual_series = {
+            row.timestamp: target for row, target in zip(holdout_rows, holdout_targets, strict=True)
+        }
+        feature_series = {row.timestamp: row for row in holdout_rows}
+        origins = [holdout_rows[i].timestamp for i in range(0, len(holdout_rows), 24) if i > 0]
+
+        if origins:
+            try:
+                day_metrics = backtest.walk_forward_backtest(
+                    direct_model, actual_series, feature_series, origins
+                )
+                thresholds = backtest.derive_confidence_thresholds(day_metrics)
+                if thresholds:
+                    high_max_hours, medium_max_hours = thresholds
+                logger.info(
+                    "pipeline.zone_backtest",
+                    zone=zone,
+                    backtest_days=len(day_metrics),
+                    high_max_hours=high_max_hours,
+                    medium_max_hours=medium_max_hours,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "pipeline.backtest_failed",
+                    zone=zone,
+                    error=str(exc),
+                    note="falling back to fixed confidence thresholds",
+                )
+
     lifecycle_rows, lifecycle_targets = load_training_rows(
         settings.sqlite_path, zone, target="lifecycle"
     )
@@ -366,17 +414,42 @@ async def _run_zone(
         wind_capacity_mw=capacity.get("wind"),
         solar_capacity_mw=capacity.get("solar"),
     )
-    direct_predictions = direct_model.predict(forecast_rows)
-    lifecycle_by_timestamp = (
-        {p.timestamp: p.value_g_per_kwh for p in lifecycle_model.predict(forecast_rows)}
-        if lifecycle_model is not None
-        else {}
+
+    # INTENSITY_LAG_HOURS > the 120h forecast horizon, so every lag lookup
+    # resolves to an already-observed hour -- never one still ahead.
+    intensity_lag_since = now - dt.timedelta(hours=INTENSITY_LAG_HOURS + 1)
+    direct_lag_history = load_recent_intensity(
+        settings.sqlite_path, zone, since=intensity_lag_since, target="direct"
     )
-    breakdown_by_timestamp = (
-        {p.timestamp: p.power_breakdown_percent for p in breakdown_model.predict(forecast_rows)}
-        if breakdown_model is not None
-        else {}
+    direct_forecast_rows = with_intensity_lag(forecast_rows, direct_lag_history)
+    direct_predictions = direct_model.predict(
+        direct_forecast_rows,
+        high_max_hours=high_max_hours,
+        medium_max_hours=medium_max_hours,
     )
+    lifecycle_by_timestamp: dict[dt.datetime, float] = {}
+    if lifecycle_model is not None:
+        lifecycle_lag_history = load_recent_intensity(
+            settings.sqlite_path, zone, since=intensity_lag_since, target="lifecycle"
+        )
+        lifecycle_forecast_rows = with_intensity_lag(forecast_rows, lifecycle_lag_history)
+        lifecycle_by_timestamp = {
+            p.timestamp: p.value_g_per_kwh
+            for p in lifecycle_model.predict(
+                lifecycle_forecast_rows,
+                high_max_hours=high_max_hours,
+                medium_max_hours=medium_max_hours,
+            )
+        }
+    breakdown_by_timestamp: dict[dt.datetime, dict[str, float]] = {}
+    if breakdown_model is not None:
+        breakdown_history = load_recent_breakdowns(
+            settings.sqlite_path, zone, since=now - dt.timedelta(hours=BREAKDOWN_LAG_HOURS + 1)
+        )
+        breakdown_by_timestamp = {
+            p.timestamp: p.power_breakdown_percent
+            for p in breakdown_model.predict(forecast_rows, breakdown_history=breakdown_history)
+        }
     price_by_timestamp: dict[dt.datetime, float] = {}
     if price_model is not None:
         # PRICE_LAG_HOURS > the 120h forecast horizon, so every lag lookup
@@ -386,7 +459,12 @@ async def _run_zone(
         )
         price_forecast_rows = with_price_lag(forecast_rows, price_lag_history)
         price_by_timestamp = {
-            p.timestamp: p.price_eur_per_mwh for p in price_model.predict(price_forecast_rows)
+            p.timestamp: p.price_eur_per_mwh
+            for p in price_model.predict(
+                price_forecast_rows,
+                high_max_hours=high_max_hours,
+                medium_max_hours=medium_max_hours,
+            )
         }
     predictions = [
         Prediction(
@@ -410,6 +488,18 @@ async def _run_zone(
         forecast_horizon_hours=len(predictions),
     )
 
+    backtest_payload = None
+    if day_metrics:
+        backtest_payload = [
+            {
+                "day": d.day,
+                "model_mae": round(d.model_mae, 1),
+                "naive_mae": round(d.naive_mae, 1),
+                "n": d.n,
+            }
+            for d in day_metrics
+        ]
+
     return build_payload(
         predictions,
         zone=zone,
@@ -418,6 +508,7 @@ async def _run_zone(
         source_repo_url=settings.source_repo_url,
         training_rows=len(training_rows),
         current=_current_breakdown(production_by_hour, factors),
+        backtest=backtest_payload,
     )
 
 

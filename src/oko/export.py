@@ -46,6 +46,7 @@ def build_payload(
     source_repo_url: str,
     training_rows: int,
     current: CurrentBreakdown | None = None,
+    backtest: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build forecast JSON payload."""
     return {
@@ -54,6 +55,7 @@ def build_payload(
         "model_version": model_version,
         "unit": "gCO2eq/kWh",
         "training_rows": training_rows,
+        "backtest": backtest,
         "current": (
             {
                 "timestamp": format_iso_z(current.timestamp),

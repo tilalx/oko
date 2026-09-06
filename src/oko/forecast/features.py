@@ -78,6 +78,39 @@ SURFACE_ROUGHNESS_LENGTH_M = 0.1
 #: the same fixed 65/35 split this module previously always used.
 DEFAULT_WIND_WEIGHT = 0.65
 
+#: How far back the carbon-intensity autocorrelation feature looks —
+#: same 168h (one week prior) choice and same reason as
+#: ``PRICE_LAG_HOURS``: greater than OKO's 120h forecast horizon, so the
+#: lookup always resolves to an already-observed hour, never one that
+#: would itself need to be forecast recursively.
+INTENSITY_LAG_HOURS = 168
+
+#: A second, shorter intensity autocorrelation lookback -- daily rather
+#: than weekly autocorrelation. Unlike ``INTENSITY_LAG_HOURS``, this is
+#: *not* always greater than the 120h forecast horizon, so it resolves
+#: to NaN (handled natively by LightGBM) for any forecast row more than
+#: 24h out -- still populated for every training row, and for exactly
+#: the short-horizon forecast rows where the model is already most
+#: trusted (see ``CONFIDENCE_HIGH_MAX_HOURS``).
+INTENSITY_LAG_HOURS_SHORT = 24
+
+#: Degree-day "balance point" temperature (°C) — the standard reference
+#: below/above which heating/cooling demand is assumed to start rising.
+#: A generic value, not calibrated per zone.
+TEMPERATURE_BALANCE_POINT_C = 18.0
+
+#: Degree-day deviation (°C from the balance point) at which the demand
+#: adjustment below saturates — deliberately simple, uncalibrated MVP
+#: proxy, same spirit as ``WIND_SATURATION_MS``/``DSWRF_SATURATION_WM2``.
+TEMPERATURE_DEGREE_DAY_SATURATION_C = 15.0
+
+#: Maximum upward adjustment to the weather-proxy residual load share
+#: from temperature-driven demand (heating/cooling), applied at/above
+#: ``TEMPERATURE_DEGREE_DAY_SATURATION_C`` degree-days — bounded so
+#: temperature can only push the wind/solar-driven proxy up, never
+#: invert or dominate it.
+TEMPERATURE_DEMAND_ADJUSTMENT_MAX = 0.15
+
 
 @dataclass(frozen=True, slots=True)
 class FeatureRow:
@@ -93,6 +126,22 @@ class FeatureRow:
         horizon_hours: hours ahead of the forecast's reference time this
             row is for; ``0`` for historical training rows (not a
             forecast at all, so there's no horizon to speak of).
+        intensity_lag_24h, intensity_lag_168h: the carbon intensity 24h /
+            ``INTENSITY_LAG_HOURS`` (168h) before this row's timestamp,
+            if known -- ``CarbonIntensityModel``-only features (see
+            ``CARBON_FEATURE_COLUMNS``); ``None``/unset for every other
+            model, and for rows where that lag isn't yet in history
+            (bootstrap window, or -- for the 24h lag only -- a forecast
+            horizon beyond 24h, where the lagged hour is still in the
+            future).
+        wind_share, solar_share: each variable-renewable source's own,
+            unblended contribution -- ``CarbonIntensityModel``-only
+            features (see ``CARBON_FEATURE_COLUMNS``) alongside the
+            already-blended ``residual_load_share``, letting the model
+            learn the wind/solar interaction itself instead of relying
+            solely on a fixed capacity-weighted blend. Default ``0.0``
+            (not ``None``) since they're always computable, never a
+            "not yet available" case like the lag features.
         price_lag_168h: the day-ahead price ``PRICE_LAG_HOURS`` before
             this row's timestamp, if known -- ``PriceModel``-only feature
             (see ``PRICE_FEATURE_COLUMNS``); ``None``/unset for every
@@ -109,14 +158,19 @@ class FeatureRow:
     month_cos: float
     residual_load_share: float
     horizon_hours: int
+    intensity_lag_168h: float | None = None
+    intensity_lag_24h: float | None = None
+    wind_share: float = 0.0
+    solar_share: float = 0.0
     price_lag_168h: float | None = None
 
     def as_dict(self) -> dict[str, float]:
         """Return the model-input columns (excludes ``timestamp``) as a plain dict.
 
-        ``price_lag_168h`` is emitted as NaN when unset -- LightGBM
-        handles missing values natively, and NaN (unlike ``0.0``) can't
-        be mistaken for a real observed price.
+        ``intensity_lag_24h``/``intensity_lag_168h``/``price_lag_168h``
+        are emitted as NaN when unset -- LightGBM handles missing values
+        natively, and NaN (unlike ``0.0``) can't be mistaken for a real
+        observed value.
         """
         return {
             "hour_sin": self.hour_sin,
@@ -127,6 +181,14 @@ class FeatureRow:
             "month_cos": self.month_cos,
             "residual_load_share": self.residual_load_share,
             "horizon_hours": float(self.horizon_hours),
+            "intensity_lag_168h": (
+                self.intensity_lag_168h if self.intensity_lag_168h is not None else math.nan
+            ),
+            "intensity_lag_24h": (
+                self.intensity_lag_24h if self.intensity_lag_24h is not None else math.nan
+            ),
+            "wind_share": self.wind_share,
+            "solar_share": self.solar_share,
             "price_lag_168h": (
                 self.price_lag_168h if self.price_lag_168h is not None else math.nan
             ),
@@ -146,9 +208,21 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "horizon_hours",
 )
 
-#: ``PriceModel``'s column set -- ``FEATURE_COLUMNS`` plus the price-lag
-#: autocorrelation feature (see ``with_price_lag``).
-PRICE_FEATURE_COLUMNS: tuple[str, ...] = (*FEATURE_COLUMNS, "price_lag_168h")
+#: ``CarbonIntensityModel``'s column set -- ``FEATURE_COLUMNS`` plus the
+#: intensity autocorrelation features (see ``with_intensity_lag``) and
+#: the unblended wind/solar shares (see ``wind_share``/``solar_share``).
+CARBON_FEATURE_COLUMNS: tuple[str, ...] = (
+    *FEATURE_COLUMNS,
+    "intensity_lag_168h",
+    "intensity_lag_24h",
+    "wind_share",
+    "solar_share",
+)
+
+#: ``PriceModel``'s column set -- ``CARBON_FEATURE_COLUMNS`` plus the
+#: price-lag autocorrelation feature (see ``with_price_lag``). Also the
+#: full, in-order column set ``FeatureRow.as_dict()`` emits.
+PRICE_FEATURE_COLUMNS: tuple[str, ...] = (*CARBON_FEATURE_COLUMNS, "price_lag_168h")
 
 
 def _cyclical_encoding(value: float, period: float) -> tuple[float, float]:
@@ -162,6 +236,28 @@ def _calendar_features(timestamp: dt.datetime) -> tuple[float, float, float, flo
     dow_sin, dow_cos = _cyclical_encoding(timestamp.weekday(), 7)
     month_sin, month_cos = _cyclical_encoding(timestamp.month - 1, 12)
     return hour_sin, hour_cos, dow_sin, dow_cos, month_sin, month_cos
+
+
+def _component_shares_from_production(
+    production_by_category: Mapping[str, float], load_mw: float
+) -> tuple[float, float] | None:
+    """Compute each variable-renewable source's own share of load, unblended.
+
+    Args:
+        production_by_category: that hour's actual generation mix, MW
+            (as returned by ``oko.fetchers.entsoe.fetch_production``).
+        load_mw: that hour's actual total system load, MW.
+
+    Returns:
+        ``(wind_mw / load_mw, solar_mw / load_mw)``, each independently
+        clipped to ``[0, 1]``, or ``None`` if ``load_mw`` isn't usable
+        (zero/negative — can't form a ratio).
+    """
+    if load_mw <= 0:
+        return None
+    wind_share = min(max(production_by_category.get("wind", 0.0), 0.0) / load_mw, 1.0)
+    solar_share = min(max(production_by_category.get("solar", 0.0), 0.0) / load_mw, 1.0)
+    return wind_share, solar_share
 
 
 def residual_load_share_from_production(
@@ -178,13 +274,11 @@ def residual_load_share_from_production(
         ``1 - (wind + solar) / load``, clipped to ``[0, 1]``, or ``None``
         if ``load_mw`` isn't usable (zero/negative — can't form a ratio).
     """
-    if load_mw <= 0:
+    shares = _component_shares_from_production(production_by_category, load_mw)
+    if shares is None:
         return None
-    renewable_mw = production_by_category.get("wind", 0.0) + production_by_category.get(
-        "solar", 0.0
-    )
-    share = 1.0 - max(renewable_mw, 0.0) / load_mw
-    return min(max(share, 0.0), 1.0)
+    wind_share, solar_share = shares
+    return min(max(1.0 - wind_share - solar_share, 0.0), 1.0)
 
 
 def _wind_speed_at_hub_height(wind_speed_10m_ms: float) -> float:
@@ -204,12 +298,53 @@ def _wind_speed_at_hub_height(wind_speed_10m_ms: float) -> float:
     return wind_speed_10m_ms * ratio
 
 
+def _wind_solar_proxies(wind_speed_10m_ms: float, dswrf_wm2: float) -> tuple[float, float]:
+    """Raw, unblended wind/solar output proxies from a NOAA GFS forecast point.
+
+    See ``residual_load_share_from_weather`` for the full derivation of
+    each proxy. Split out so callers that want the two components
+    separately (e.g. ``wind_share``/``solar_share`` in ``FeatureRow``,
+    letting the model learn their interaction itself) don't have to
+    duplicate this math, and so ``residual_load_share_from_weather``'s
+    capacity-weighted blend stays a thin wrapper around the same values.
+    """
+    hub_height_wind_ms = _wind_speed_at_hub_height(wind_speed_10m_ms)
+    wind_proxy = min(hub_height_wind_ms, WIND_SATURATION_MS) ** 3 / WIND_SATURATION_MS**3
+    if hub_height_wind_ms > WIND_CUTOUT_MS:
+        wind_proxy = 0.0
+    solar_proxy = min(max(dswrf_wm2, 0.0), DSWRF_SATURATION_WM2) / DSWRF_SATURATION_WM2
+    return wind_proxy, solar_proxy
+
+
+def _temperature_demand_adjustment(temperature_2m_c: float | None) -> float:
+    """Bounded upward nudge to the residual-load-share proxy from temperature.
+
+    Deliberately simple, uncalibrated MVP proxy (see
+    ``TEMPERATURE_BALANCE_POINT_C`` / ``TEMPERATURE_DEGREE_DAY_SATURATION_C``):
+    the further temperature strays from the balance point in either
+    direction, the more heating/cooling demand is assumed to add on top
+    of the wind/solar-driven supply proxy -- capped at
+    ``TEMPERATURE_DEMAND_ADJUSTMENT_MAX`` so it can only push the result
+    up, never invert or dominate the supply-side signal. Returns 0.0 when
+    temperature isn't available (backward compatible with callers that
+    don't have it).
+    """
+    if temperature_2m_c is None:
+        return 0.0
+    degree_days = abs(temperature_2m_c - TEMPERATURE_BALANCE_POINT_C)
+    fraction = min(degree_days, TEMPERATURE_DEGREE_DAY_SATURATION_C) / (
+        TEMPERATURE_DEGREE_DAY_SATURATION_C
+    )
+    return fraction * TEMPERATURE_DEMAND_ADJUSTMENT_MAX
+
+
 def residual_load_share_from_weather(
     wind_speed_10m_ms: float,
     dswrf_wm2: float,
     *,
     wind_capacity_mw: float | None = None,
     solar_capacity_mw: float | None = None,
+    temperature_2m_c: float | None = None,
 ) -> float:
     """Approximate the same normalised quantity from a NOAA GFS forecast point.
 
@@ -241,15 +376,16 @@ def residual_load_share_from_weather(
         dswrf_wm2: zone-averaged downward shortwave radiation flux, W/m².
         wind_capacity_mw: zone's installed wind capacity, MW, if known.
         solar_capacity_mw: zone's installed solar capacity, MW, if known.
+        temperature_2m_c: zone-averaged 2 m air temperature, °C, if
+            known -- adds a bounded heating/cooling demand adjustment on
+            top of the supply-side proxy (see
+            ``_temperature_demand_adjustment``); omitted/``None`` leaves
+            behavior unchanged from before this parameter existed.
 
     Returns:
         The proxy ``residual_load_share``, in ``[0, 1]``.
     """
-    hub_height_wind_ms = _wind_speed_at_hub_height(wind_speed_10m_ms)
-    wind_proxy = min(hub_height_wind_ms, WIND_SATURATION_MS) ** 3 / WIND_SATURATION_MS**3
-    if hub_height_wind_ms > WIND_CUTOUT_MS:
-        wind_proxy = 0.0
-    solar_proxy = min(max(dswrf_wm2, 0.0), DSWRF_SATURATION_WM2) / DSWRF_SATURATION_WM2
+    wind_proxy, solar_proxy = _wind_solar_proxies(wind_speed_10m_ms, dswrf_wm2)
 
     wind_weight = DEFAULT_WIND_WEIGHT
     if wind_capacity_mw is not None and solar_capacity_mw is not None:
@@ -258,7 +394,8 @@ def residual_load_share_from_weather(
         if total_capacity_mw > 0:
             wind_weight = wind_capacity_mw / total_capacity_mw
     renewable_proxy = wind_weight * wind_proxy + (1.0 - wind_weight) * solar_proxy
-    return min(max(1.0 - renewable_proxy, 0.0), 1.0)
+    share = 1.0 - renewable_proxy + _temperature_demand_adjustment(temperature_2m_c)
+    return min(max(share, 0.0), 1.0)
 
 
 def with_price_lag(
@@ -282,6 +419,37 @@ def with_price_lag(
     return [replace(row, price_lag_168h=price_by_hour.get(row.timestamp - lag)) for row in rows]
 
 
+def with_intensity_lag(
+    rows: Sequence[FeatureRow], intensity_by_hour: Mapping[dt.datetime, float]
+) -> list[FeatureRow]:
+    """Return copies of ``rows`` with both intensity lags filled from ``intensity_by_hour``.
+
+    Args:
+        rows: feature rows to attach lags to (training or forecast rows).
+        intensity_by_hour: observed carbon intensity, hour -> g CO2eq/kWh
+            -- typically every value already persisted in history, so a
+            lookup at ``row.timestamp`` minus either lag resolves
+            whenever that hour has been observed.
+
+    Returns:
+        One ``FeatureRow`` per input row, same order, with
+        ``intensity_lag_24h`` and ``intensity_lag_168h`` each set (or
+        left ``None`` if that hour isn't in ``intensity_by_hour`` --
+        expected for ``intensity_lag_24h`` on any forecast row more than
+        24h past ``reference_time``, see ``INTENSITY_LAG_HOURS_SHORT``).
+    """
+    lag_168h = dt.timedelta(hours=INTENSITY_LAG_HOURS)
+    lag_24h = dt.timedelta(hours=INTENSITY_LAG_HOURS_SHORT)
+    return [
+        replace(
+            row,
+            intensity_lag_168h=intensity_by_hour.get(row.timestamp - lag_168h),
+            intensity_lag_24h=intensity_by_hour.get(row.timestamp - lag_24h),
+        )
+        for row in rows
+    ]
+
+
 def build_training_features(
     production_by_hour: Mapping[dt.datetime, Mapping[str, float]],
     load_by_hour: Mapping[dt.datetime, float],
@@ -299,11 +467,12 @@ def build_training_features(
     """
     rows = []
     for timestamp in sorted(set(production_by_hour) & set(load_by_hour)):
-        share = residual_load_share_from_production(
-            production_by_hour[timestamp], load_by_hour[timestamp]
-        )
-        if share is None:
+        load_mw = load_by_hour[timestamp]
+        shares = _component_shares_from_production(production_by_hour[timestamp], load_mw)
+        if shares is None:
             continue
+        wind_share, solar_share = shares
+        share = min(max(1.0 - wind_share - solar_share, 0.0), 1.0)
         hour_sin, hour_cos, dow_sin, dow_cos, month_sin, month_cos = _calendar_features(timestamp)
         rows.append(
             FeatureRow(
@@ -316,6 +485,8 @@ def build_training_features(
                 month_cos=month_cos,
                 residual_load_share=share,
                 horizon_hours=0,
+                wind_share=wind_share,
+                solar_share=solar_share,
             )
         )
     return rows
@@ -350,6 +521,7 @@ def build_forecast_features(
             point.valid_time
         )
         horizon = round((point.valid_time - reference_time).total_seconds() / 3600)
+        wind_proxy, solar_proxy = _wind_solar_proxies(point.wind_speed_10m_ms, point.dswrf_wm2)
         rows.append(
             FeatureRow(
                 timestamp=point.valid_time,
@@ -364,8 +536,11 @@ def build_forecast_features(
                     point.dswrf_wm2,
                     wind_capacity_mw=wind_capacity_mw,
                     solar_capacity_mw=solar_capacity_mw,
+                    temperature_2m_c=point.temperature_2m_c,
                 ),
                 horizon_hours=horizon,
+                wind_share=wind_proxy,
+                solar_share=solar_proxy,
             )
         )
     return rows

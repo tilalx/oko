@@ -45,6 +45,7 @@ def test_build_payload_matches_binding_schema() -> None:
         "model_version": "0.1.0",
         "unit": "gCO2eq/kWh",
         "training_rows": 2016,
+        "backtest": None,
         "current": None,
         "forecast": [
             {
@@ -97,6 +98,49 @@ def test_build_payload_includes_current_breakdown_when_given() -> None:
         "fossil_free_percent": 60.0,
         "emissions_breakdown_percent": {"coal": 100.0},
     }
+
+
+def test_build_payload_includes_backtest_when_provided() -> None:
+    predictions = [
+        Prediction(
+            timestamp=GENERATED_AT,
+            value_g_per_kwh=100.0,
+            confidence="high",
+        )
+    ]
+    backtest_data = [
+        {"day": 1, "model_mae": 10.0, "naive_mae": 20.0, "n": 24},
+        {"day": 2, "model_mae": 15.0, "naive_mae": 20.0, "n": 24},
+    ]
+    payload = build_payload(
+        predictions,
+        zone="DE-LU",
+        generated_at=GENERATED_AT,
+        model_version="test",
+        source_repo_url="https://example.com",
+        training_rows=100,
+        backtest=backtest_data,
+    )
+    assert payload["backtest"] == backtest_data
+
+
+def test_build_payload_backtest_null_when_omitted() -> None:
+    predictions = [
+        Prediction(
+            timestamp=GENERATED_AT,
+            value_g_per_kwh=100.0,
+            confidence="high",
+        )
+    ]
+    payload = build_payload(
+        predictions,
+        zone="DE-LU",
+        generated_at=GENERATED_AT,
+        model_version="test",
+        source_repo_url="https://example.com",
+        training_rows=100,
+    )
+    assert payload["backtest"] is None
 
 
 def test_current_breakdown_emissions_field_defaults_to_empty() -> None:

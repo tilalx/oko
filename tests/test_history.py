@@ -14,6 +14,8 @@ from oko.history import (
     load_breakdown_training_rows,
     load_installed_capacity,
     load_price_training_rows,
+    load_recent_breakdowns,
+    load_recent_intensity,
     load_recent_prices,
     load_training_rows,
     query_recent,
@@ -137,6 +139,79 @@ def test_load_training_rows_lifecycle_target_excludes_null_rows(tmp_path: Path) 
     assert len(lifecycle_features) == 1
     assert lifecycle_features[0].timestamp == HOUR
     assert lifecycle_targets == [250.0]
+
+
+def test_load_training_rows_fills_168h_intensity_lag_from_history(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    week_ago = _row(HOUR - dt.timedelta(hours=168), 0.5, 190.0)
+    target = _row(HOUR, 0.5, 200.0)
+    no_lag_available = _row(HOUR + dt.timedelta(hours=1), 0.5, 210.0)
+
+    upsert_rows(db_path, [week_ago, target, no_lag_available])
+    rows, targets = load_training_rows(db_path, "DE-LU")
+
+    by_timestamp = dict(zip([r.timestamp for r in rows], rows, strict=True))
+    assert by_timestamp[HOUR - dt.timedelta(hours=168)].intensity_lag_168h is None
+    assert by_timestamp[HOUR].intensity_lag_168h == 190.0
+    assert by_timestamp[HOUR + dt.timedelta(hours=1)].intensity_lag_168h is None
+    assert targets == [190.0, 200.0, 210.0]
+
+
+def test_load_training_rows_lifecycle_lag_uses_lifecycle_series(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    week_ago = _row(HOUR - dt.timedelta(hours=168), 0.5, 190.0, lifecycle=230.0)
+    target = _row(HOUR, 0.5, 200.0, lifecycle=250.0)
+
+    upsert_rows(db_path, [week_ago, target])
+    rows, targets = load_training_rows(db_path, "DE-LU", target="lifecycle")
+
+    by_timestamp = dict(zip([r.timestamp for r in rows], rows, strict=True))
+    assert by_timestamp[HOUR].intensity_lag_168h == 230.0
+    assert targets == [230.0, 250.0]
+
+
+def test_load_recent_intensity_filters_by_since_and_excludes_null(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    old = _row(HOUR - dt.timedelta(hours=200), 0.5, 100.0)
+    recent = _row(HOUR, 0.5, 200.0)
+
+    upsert_rows(db_path, [old, recent])
+    values = load_recent_intensity(db_path, "DE-LU", since=HOUR - dt.timedelta(hours=1))
+
+    assert values == {HOUR: 200.0}
+
+
+def test_load_recent_intensity_lifecycle_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    with_lifecycle = _row(HOUR, 0.5, 200.0, lifecycle=250.0)
+    without_lifecycle = _row(HOUR + dt.timedelta(hours=1), 0.5, 210.0)
+
+    upsert_rows(db_path, [with_lifecycle, without_lifecycle])
+    values = load_recent_intensity(
+        db_path, "DE-LU", since=HOUR - dt.timedelta(hours=1), target="lifecycle"
+    )
+
+    assert values == {HOUR: 250.0}
+
+
+def test_load_recent_intensity_empty_for_missing_db(tmp_path: Path) -> None:
+    assert load_recent_intensity(tmp_path / "missing.sqlite3", "DE-LU", since=HOUR) == {}
+
+
+def test_load_recent_breakdowns_filters_by_since_and_excludes_null(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    old = _row(HOUR - dt.timedelta(hours=200), 0.5, 100.0, breakdown={"wind": 50.0, "coal": 50.0})
+    recent = _row(HOUR, 0.5, 200.0, breakdown={"wind": 70.0, "gas": 30.0})
+    no_breakdown = _row(HOUR + dt.timedelta(hours=1), 0.5, 210.0)
+
+    upsert_rows(db_path, [old, recent, no_breakdown])
+    breakdowns = load_recent_breakdowns(db_path, "DE-LU", since=HOUR - dt.timedelta(hours=1))
+
+    assert breakdowns == {HOUR: {"wind": 70.0, "gas": 30.0}}
+
+
+def test_load_recent_breakdowns_empty_for_missing_db(tmp_path: Path) -> None:
+    assert load_recent_breakdowns(tmp_path / "missing.sqlite3", "DE-LU", since=HOUR) == {}
 
 
 def test_query_recent_respects_since_and_returns_all_fields(tmp_path: Path) -> None:
