@@ -65,10 +65,39 @@ class HistoryRow:
     price_eur_per_mwh: float | None = None
 
 
+def _apply_tuning_pragmas(conn: sqlite3.Connection) -> None:
+    """Per-connection tuning for a large (multi-GB, multi-million-row) database.
+
+    Deliberately excludes ``journal_mode`` -- see ``_get_query_connection``,
+    the only place that touches it. These others are safe on any
+    connection: they don't change the on-disk journal format, so a
+    short-lived connection setting them can't leave anything pending for
+    a later checkpoint to replay.
+    """
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA cache_size=-65536")  # 64 MiB page cache (negative = KiB)
+
+
+def _connect(path: Path) -> sqlite3.Connection:
+    """Open a short-lived connection with the safe tuning pragmas applied.
+
+    Never touches ``journal_mode`` (see ``_get_query_connection``): a
+    short-lived connection that switched the file to WAL and then wrote
+    through it could leave committed frames sitting in the WAL file,
+    unwritten to the main file, until some later connection closes and
+    checkpoints them -- corrupting the main file if it was replaced
+    (e.g. by ``oko.api.dataset_sync``) in the meantime.
+    """
+    conn = sqlite3.connect(path)
+    _apply_tuning_pragmas(conn)
+    return conn
+
+
 def init_db(path: Path) -> None:
     """Initialize database schema and apply migrations."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as conn:
+    with _connect(path) as conn:
         conn.execute(_SCHEMA)
         conn.execute(_CAPACITY_SCHEMA)
         for column, sql_type in _MIGRATION_COLUMNS:
@@ -94,7 +123,7 @@ def upsert_installed_capacity(
     if not capacity_by_category:
         return
     init_db(path)
-    with sqlite3.connect(path) as conn:
+    with _connect(path) as conn:
         conn.executemany(
             """
             INSERT INTO installed_capacity (zone, category, capacity_mw, year, fetched_at)
@@ -119,7 +148,7 @@ def load_installed_capacity(path: Path, zone: str) -> dict[str, float]:
     if not path.exists():
         return {}
     init_db(path)  # tolerate a DB file whose schema predates this table
-    with sqlite3.connect(path) as conn:
+    with _connect(path) as conn:
         rows = conn.execute(
             "SELECT category, capacity_mw FROM installed_capacity WHERE zone = ?", (zone,)
         ).fetchall()
@@ -131,7 +160,7 @@ def installed_capacity_fetched_at(path: Path, zone: str) -> dt.datetime | None:
     if not path.exists():
         return None
     init_db(path)  # tolerate a DB file whose schema predates this table
-    with sqlite3.connect(path) as conn:
+    with _connect(path) as conn:
         row = conn.execute(
             "SELECT fetched_at FROM installed_capacity WHERE zone = ? "
             "ORDER BY fetched_at DESC LIMIT 1",
@@ -145,7 +174,7 @@ def upsert_rows(path: Path, rows: Sequence[HistoryRow]) -> None:
     if not rows:
         return
     init_db(path)
-    with sqlite3.connect(path) as conn:
+    with _connect(path) as conn:
         conn.executemany(
             """
             INSERT INTO intensity_history
@@ -232,7 +261,7 @@ def load_training_rows(
         return [], []
     init_db(path)  # tolerate a DB file whose schema predates a later migration column
     target_column = "target_g_per_kwh" if target == "direct" else "lifecycle_g_per_kwh"
-    with sqlite3.connect(path) as conn:
+    with _connect(path) as conn:
         cursor = conn.execute(
             f"""
             SELECT timestamp, hour_sin, hour_cos, dow_sin, dow_cos,
@@ -286,7 +315,7 @@ def load_price_training_rows(path: Path, zone: str) -> tuple[list[FeatureRow], l
     if not path.exists():
         return [], []
     init_db(path)  # tolerate a DB file whose schema predates a later migration column
-    with sqlite3.connect(path) as conn:
+    with _connect(path) as conn:
         cursor = conn.execute(
             """
             SELECT timestamp, hour_sin, hour_cos, dow_sin, dow_cos,
@@ -338,7 +367,7 @@ def load_breakdown_training_rows(
     if not path.exists():
         return [], []
     init_db(path)  # tolerate a DB file whose schema predates a later migration column
-    with sqlite3.connect(path) as conn:
+    with _connect(path) as conn:
         cursor = conn.execute(
             """
             SELECT timestamp, hour_sin, hour_cos, dow_sin, dow_cos,
@@ -427,6 +456,8 @@ def _get_query_connection(path: Path) -> sqlite3.Connection:
         init_db(path)
         _query_conn = sqlite3.connect(path, timeout=10.0, check_same_thread=False)
         _query_conn.execute("PRAGMA journal_mode=WAL")
+        _query_conn.execute("PRAGMA mmap_size=268435456")  # 256 MiB, read-mostly table scans
+        _apply_tuning_pragmas(_query_conn)
         _query_conn_path = path
     return _query_conn
 

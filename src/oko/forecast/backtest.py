@@ -124,19 +124,30 @@ def walk_forward_backtest(
     naive_errors_by_day: dict[int, list[float]] = {}
 
     for origin in origins:
+        batch_rows = []
+        batch_hours = []
+        batch_actuals = []
+        batch_naive_refs = []
         for h in range(1, horizon_hours + 1):
             target_time = origin + dt.timedelta(hours=h)
             actual = actual_series.get(target_time)
             row = feature_series.get(target_time)
             if actual is None or row is None:
                 continue
+            batch_rows.append(dataclasses.replace(row, horizon_hours=h))
+            batch_hours.append(h)
+            batch_actuals.append(actual)
+            batch_naive_refs.append(actual_series.get(target_time - dt.timedelta(hours=24)))
 
-            prediction_row = dataclasses.replace(row, horizon_hours=h)
-            predicted = model.predict([prediction_row])[0].value_g_per_kwh
+        if not batch_rows:
+            continue
+
+        predictions = model.predict(batch_rows)
+        for h, actual, naive_reference, prediction in zip(
+            batch_hours, batch_actuals, batch_naive_refs, predictions, strict=True
+        ):
             day = day_of_horizon(h)
-            model_errors_by_day.setdefault(day, []).append(abs(predicted - actual))
-
-            naive_reference = actual_series.get(target_time - dt.timedelta(hours=24))
+            model_errors_by_day.setdefault(day, []).append(abs(prediction.value_g_per_kwh - actual))
             if naive_reference is not None:
                 naive_errors_by_day.setdefault(day, []).append(abs(naive_reference - actual))
 
