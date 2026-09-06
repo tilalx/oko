@@ -69,7 +69,7 @@ pipeline {
             post {
                 success { script { reportCheck('lint', 'SUCCESS', 'Lint and type-check passed.', tailLog('logs/lint.log')) } }
                 failure { script { reportCheck('lint', 'FAILURE', 'Lint or type-check failed.', tailLog('logs/lint.log')) } }
-                aborted { script { reportCheck('lint', 'ABORTED', 'Lint aborted.', tailLog('logs/lint.log')) } }
+                aborted { script { reportCheck('lint', 'CANCELED', 'Lint aborted.', tailLog('logs/lint.log')) } }
                 always  { sh "docker rmi oko:lint-${env.BUILD_NUMBER} || true" }
             }
         }
@@ -88,7 +88,7 @@ pipeline {
             post {
                 success { script { reportCheck('test', 'SUCCESS', 'Test suite passed.', tailLog('logs/test.log')) } }
                 failure { script { reportCheck('test', 'FAILURE', 'Test suite failed.', tailLog('logs/test.log')) } }
-                aborted { script { reportCheck('test', 'ABORTED', 'Test run aborted.', tailLog('logs/test.log')) } }
+                aborted { script { reportCheck('test', 'CANCELED', 'Test run aborted.', tailLog('logs/test.log')) } }
                 always  { sh "docker rmi oko:test-${env.BUILD_NUMBER} || true" }
             }
         }
@@ -103,7 +103,7 @@ pipeline {
                     }
                 }
             }
-            options { timeout(time: 10, unit: 'MINUTES') }
+            options { timeout(time: 30, unit: 'MINUTES') }
             steps {
                 script { startCheck('publish-dataset', 'Publishing forecast dataset...') }
                 sh "docker build --target runtime -t ${IMAGE_TAG} ."
@@ -146,7 +146,7 @@ pipeline {
             post {
                 success  { script { reportCheck('publish-dataset', 'SUCCESS', 'Dataset published to oko-dataset.', tailLog('logs/publish-dataset.log')) } }
                 failure  { script { reportCheck('publish-dataset', 'FAILURE', 'Dataset publish failed.', tailLog('logs/publish-dataset.log')) } }
-                aborted  { script { reportCheck('publish-dataset', 'ABORTED', 'Dataset publish aborted.', tailLog('logs/publish-dataset.log')) } }
+                aborted  { script { reportCheck('publish-dataset', 'CANCELED', 'Dataset publish aborted.', tailLog('logs/publish-dataset.log')) } }
                 notBuilt { script { reportCheck('publish-dataset', 'SKIPPED', 'Not an hourly main-branch run; publish skipped.') } }
                 always   { sh "docker rmi ${IMAGE_TAG} || true" }
             }
@@ -174,7 +174,7 @@ pipeline {
             post {
                 success  { script { reportCheck('build-server-image', 'SUCCESS', 'oko-serve image built.', tailLog('logs/build-server-image.log')) } }
                 failure  { script { reportCheck('build-server-image', 'FAILURE', 'oko-serve image build failed.', tailLog('logs/build-server-image.log')) } }
-                aborted  { script { reportCheck('build-server-image', 'ABORTED', 'oko-serve image build aborted.', tailLog('logs/build-server-image.log')) } }
+                aborted  { script { reportCheck('build-server-image', 'CANCELED', 'oko-serve image build aborted.', tailLog('logs/build-server-image.log')) } }
                 notBuilt { script { reportCheck('build-server-image', 'SKIPPED', 'Not a main-branch code push; build skipped.') } }
             }
         }
