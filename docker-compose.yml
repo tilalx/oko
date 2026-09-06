@@ -41,13 +41,6 @@ services:
       SQLITE_PATH: /output/oko.sqlite3
     profiles: ["serve"]
     volumes:
-      - oko-data:/output
-      # Persists oko.api.dataset_sync's git+LFS clone (settings.data_dir,
-      # default /app/data) across restarts. Without this, every container
-      # recreate starts from an empty clone and re-pulls the full
-      # multi-GB LFS dataset from GitHub on startup -- slow, and prone to
-      # blowing the 300s `git lfs pull` timeout in production, unlike a
-      # local dev box's faster network/disk.
       - oko-dataset-cache:/app/data
 
 volumes:
