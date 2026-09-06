@@ -32,12 +32,86 @@ DEFAULT_LGB_PARAMS: dict[str, object] = {
 }
 DEFAULT_NUM_BOOST_ROUND = 200
 
+#: Upper bound on boosting rounds when training with early stopping --
+#: actual rounds used are chosen by validation MAE, not this constant
+#: (see ``_train_with_early_stopping``); kept generous since early
+#: stopping is what prevents overfitting, not this cap.
+MAX_NUM_BOOST_ROUND = 2000
 
-def confidence_for_horizon(horizon_hours: int) -> Confidence:
-    """Confidence level based on forecast horizon."""
-    if horizon_hours <= CONFIDENCE_HIGH_MAX_HOURS:
+#: Fraction of training rows held out, chronologically (most recent rows
+#: last), as an early-stopping validation set. Chronological rather than
+#: random: a random split would let the model implicitly "see the future"
+#: relative to nearby validation rows, understating real generalisation
+#: error for a time series.
+VALIDATION_FRACTION = 0.2
+
+#: Rounds without validation-metric improvement before stopping early.
+EARLY_STOPPING_ROUNDS = 20
+
+#: Below this many rows, a chronological 80/20 split leaves too little in
+#: either half to be a meaningful validation signal -- fall back to a
+#: fixed ``DEFAULT_NUM_BOOST_ROUND`` training run instead.
+MIN_ROWS_FOR_EARLY_STOPPING = 50
+
+
+def _train_with_early_stopping(
+    matrix: np.ndarray,
+    targets: np.ndarray,
+    *,
+    params: dict[str, object] | None,
+) -> lgb.Booster:
+    """Train one booster, choosing boosting rounds via chronological validation.
+
+    Args:
+        matrix: feature matrix, rows in chronological order (callers pass
+            already-sorted training rows).
+        targets: one target value per row, same order as ``matrix``.
+        params: LightGBM parameters; defaults to ``DEFAULT_LGB_PARAMS``.
+
+    Returns:
+        A booster trained with ``lgb.early_stopping`` on the last
+        ``VALIDATION_FRACTION`` of rows, or -- for too little data to
+        split meaningfully -- one trained for a fixed
+        ``DEFAULT_NUM_BOOST_ROUND`` on everything.
+    """
+    n = len(targets)
+    if n < MIN_ROWS_FOR_EARLY_STOPPING:
+        dataset = lgb.Dataset(matrix, label=targets)
+        return lgb.train(
+            params or DEFAULT_LGB_PARAMS, dataset, num_boost_round=DEFAULT_NUM_BOOST_ROUND
+        )
+
+    split = max(1, int(n * (1 - VALIDATION_FRACTION)))
+    train_dataset = lgb.Dataset(matrix[:split], label=targets[:split])
+    valid_dataset = lgb.Dataset(matrix[split:], label=targets[split:], reference=train_dataset)
+    return lgb.train(
+        params or DEFAULT_LGB_PARAMS,
+        train_dataset,
+        num_boost_round=MAX_NUM_BOOST_ROUND,
+        valid_sets=[valid_dataset],
+        callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False)],
+    )
+
+
+def confidence_for_horizon(
+    horizon_hours: int,
+    *,
+    high_max_hours: int = CONFIDENCE_HIGH_MAX_HOURS,
+    medium_max_hours: int = CONFIDENCE_MEDIUM_MAX_HOURS,
+) -> Confidence:
+    """Confidence level based on forecast horizon.
+
+    ``high_max_hours``/``medium_max_hours`` default to fixed constants,
+    but callers that have measured per-horizon error (e.g. from
+    ``oko.forecast.backtest.walk_forward_backtest``, binned by
+    ``backtest.day_of_horizon``) can pass thresholds derived from actual
+    error growth instead -- e.g. the hour at which model MAE crosses a
+    "no longer meaningfully better than naive persistence" bar, rather
+    than an arbitrary 24/72h guess.
+    """
+    if horizon_hours <= high_max_hours:
         return "high"
-    if horizon_hours <= CONFIDENCE_MEDIUM_MAX_HOURS:
+    if horizon_hours <= medium_max_hours:
         return "medium"
     return "low"
 
@@ -72,7 +146,6 @@ class CarbonIntensityModel:
         targets: list[float],
         *,
         params: dict[str, object] | None = None,
-        num_boost_round: int = DEFAULT_NUM_BOOST_ROUND,
     ) -> CarbonIntensityModel:
         """Train a new model on historical feature rows and their observed intensity.
 
@@ -82,10 +155,11 @@ class CarbonIntensityModel:
             targets: observed carbon intensity, g CO2eq/kWh, one per row,
                 same order as ``rows``.
             params: LightGBM parameters; defaults to ``DEFAULT_LGB_PARAMS``.
-            num_boost_round: boosting rounds.
 
         Returns:
-            A fitted ``CarbonIntensityModel``.
+            A fitted ``CarbonIntensityModel``. Boosting rounds are chosen
+            via chronological validation + early stopping rather than a
+            fixed count — see ``_train_with_early_stopping``.
 
         Raises:
             ValueError: if ``rows`` and ``targets`` don't line up, or
@@ -96,9 +170,10 @@ class CarbonIntensityModel:
         if not rows:
             raise ValueError("Cannot train on an empty dataset")
 
-        dataset = lgb.Dataset(_to_matrix(rows), label=np.array(targets, dtype=float))
-        booster = lgb.train(params or DEFAULT_LGB_PARAMS, dataset, num_boost_round=num_boost_round)
-        logger.info("model.trained", rows=len(rows), num_boost_round=num_boost_round)
+        booster = _train_with_early_stopping(
+            _to_matrix(rows), np.array(targets, dtype=float), params=params
+        )
+        logger.info("model.trained", rows=len(rows), best_iteration=booster.best_iteration)
         return cls(booster)
 
     def predict(self, rows: list[FeatureRow]) -> list[Prediction]:
@@ -167,7 +242,6 @@ class PriceModel:
         targets: list[float],
         *,
         params: dict[str, object] | None = None,
-        num_boost_round: int = DEFAULT_NUM_BOOST_ROUND,
     ) -> PriceModel:
         """Train a new model on historical feature rows and their observed price.
 
@@ -177,10 +251,11 @@ class PriceModel:
             targets: observed day-ahead price, EUR/MWh, one per row, same
                 order as ``rows``.
             params: LightGBM parameters; defaults to ``DEFAULT_LGB_PARAMS``.
-            num_boost_round: boosting rounds.
 
         Returns:
-            A fitted ``PriceModel``.
+            A fitted ``PriceModel``. Boosting rounds are chosen via
+            chronological validation + early stopping (see
+            ``_train_with_early_stopping``).
 
         Raises:
             ValueError: if ``rows`` and ``targets`` don't line up, or
@@ -191,11 +266,10 @@ class PriceModel:
         if not rows:
             raise ValueError("Cannot train on an empty dataset")
 
-        dataset = lgb.Dataset(
-            _to_matrix(rows, PRICE_FEATURE_COLUMNS), label=np.array(targets, dtype=float)
+        booster = _train_with_early_stopping(
+            _to_matrix(rows, PRICE_FEATURE_COLUMNS), np.array(targets, dtype=float), params=params
         )
-        booster = lgb.train(params or DEFAULT_LGB_PARAMS, dataset, num_boost_round=num_boost_round)
-        logger.info("price_model.trained", rows=len(rows), num_boost_round=num_boost_round)
+        logger.info("price_model.trained", rows=len(rows), best_iteration=booster.best_iteration)
         return cls(booster)
 
     def predict(self, rows: list[FeatureRow]) -> list[PricePrediction]:
@@ -275,7 +349,6 @@ class BreakdownModel:
         *,
         categories: Sequence[str] = CATEGORIES,
         params: dict[str, object] | None = None,
-        num_boost_round: int = DEFAULT_NUM_BOOST_ROUND,
     ) -> BreakdownModel:
         """Train one booster per category on historical feature rows and their observed mix.
 
@@ -291,10 +364,11 @@ class BreakdownModel:
                 to every category OKO tracks (see
                 ``oko.emissions.factors.CATEGORIES``).
             params: LightGBM parameters; defaults to ``DEFAULT_LGB_PARAMS``.
-            num_boost_round: boosting rounds.
 
         Returns:
-            A fitted ``BreakdownModel``.
+            A fitted ``BreakdownModel``. Each category's boosting rounds
+            are chosen independently via chronological validation + early
+            stopping (see ``_train_with_early_stopping``).
 
         Raises:
             ValueError: if ``rows`` and ``breakdowns`` don't line up, or
@@ -310,10 +384,7 @@ class BreakdownModel:
         boosters: dict[str, lgb.Booster] = {}
         for category in categories:
             targets = np.array([b.get(category, 0.0) for b in breakdowns], dtype=float)
-            dataset = lgb.Dataset(matrix, label=targets)
-            boosters[category] = lgb.train(
-                params or DEFAULT_LGB_PARAMS, dataset, num_boost_round=num_boost_round
-            )
+            boosters[category] = _train_with_early_stopping(matrix, targets, params=params)
         logger.info("breakdown_model.trained", rows=len(rows), categories=len(boosters))
         return cls(boosters)
 

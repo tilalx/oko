@@ -548,26 +548,26 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "lightgbm", specifier = ">=4.7.0" },
-    { name = "limits", marker = "extra == 'api'", specifier = ">=3.0" },
+    { name = "limits", marker = "extra == 'api'", specifier = ">=5.8.0" },
     { name = "numpy", specifier = ">=2.5.2" },
     { name = "pandas", specifier = ">=3.0.5" },
-    { name = "pydantic", specifier = ">=2.7" },
+    { name = "pydantic", specifier = ">=2.13.5" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "scikit-learn", specifier = ">=1.9.0" },
-    { name = "structlog", specifier = ">=24.1" },
-    { name = "uvicorn", marker = "extra == 'api'", specifier = ">=0.30" },
+    { name = "structlog", specifier = ">=26.1.0" },
+    { name = "uvicorn", marker = "extra == 'api'", specifier = ">=0.52.4" },
     { name = "xmltodict", specifier = ">=1.0.4" },
 ]
 provides-extras = ["api"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "mypy", specifier = ">=1.10" },
+    { name = "mypy", specifier = ">=2.3.1" },
     { name = "pandas-stubs", specifier = ">=3.0.5.260730" },
-    { name = "pytest", specifier = ">=8.2" },
-    { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "pytest-mock", specifier = ">=3.14" },
-    { name = "respx", specifier = ">=0.21" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pytest-mock", specifier = ">=3.15.1" },
+    { name = "respx", specifier = ">=0.23.1" },
     { name = "ruff", specifier = ">=0.16.5" },
     { name = "types-xmltodict", specifier = ">=1.0.1.20260518" },
 ]

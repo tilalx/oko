@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
+#: Provenance: global + the original 15-zone overrides below are adapted
+#: from electricitymaps-contrib's ``config/defaults.yaml``/``config/zones/
+#: {ZONE}.yaml`` (AGPLv3 -- see ATTRIBUTION.md), a one-time manual snapshot
+#: taken at the date below. There is no automated re-sync: fleet
+#: composition/efficiency (especially coal/lignite) drifts year over year,
+#: so these values should be periodically re-checked against the source
+#: and this constant updated when they are.
+FACTORS_SOURCE = "electricitymaps-contrib (config/defaults.yaml, config/zones/*.yaml), AGPLv3"
+FACTORS_LAST_UPDATED = "2026-09"
+
 GLOBAL_DIRECT_FACTORS_G_PER_KWH: dict[str, float] = {
+    # 0 g/kWh direct under the standard biogenic-neutrality convention
+    # (combustion CO2 is treated as re-absorbed by regrowth, so only
+    # non-CO2/upstream effects would count -- captured in the lifecycle
+    # factor, not here). Distinct from "waste" below, which is NOT given
+    # this convention.
     "biomass": 0.0,
     "coal": 760.0,
     "gas": 370.0,
@@ -13,6 +29,13 @@ GLOBAL_DIRECT_FACTORS_G_PER_KWH: dict[str, float] = {
     "nuclear": 0.0,
     "oil": 406.0,
     "solar": 0.0,
+    # Municipal/industrial waste incineration (ENTSO-E PSR B17): unlike
+    # "biomass", waste streams are typically ~50% fossil-derived (plastics,
+    # synthetic textiles) by mass/energy content, so treating it as
+    # biogenic-neutral would understate its emissions. 200 g/kWh is a
+    # rough global estimate (fossil-fraction share of a typical
+    # waste-to-energy plant's combustion factor); not zone-calibrated.
+    "waste": 200.0,
     "wind": 0.0,
     "unknown": 575.0,
 }
@@ -57,6 +80,7 @@ GLOBAL_LIFECYCLE_FACTORS_G_PER_KWH: dict[str, float] = {
     "nuclear": 12.0,
     "oil": 650.0,
     "solar": 45.0,
+    "waste": 400.0,  # direct (200) + plant construction/fuel-collection overhead
     "wind": 11.0,
     "unknown": 700.0,
 }
@@ -222,3 +246,16 @@ def factors_for_zone(zone: str, *, kind: FactorKind = "direct") -> dict[str, flo
         **GLOBAL_LIFECYCLE_FACTORS_G_PER_KWH,
         **ZONE_LIFECYCLE_FACTOR_OVERRIDES.get(zone, {}),
     }
+
+
+def zones_missing_override(zones: Sequence[str], *, kind: FactorKind = "direct") -> list[str]:
+    """Return which of ``zones`` have no zone-specific factor override at all.
+
+    Those zones silently fall back to the generic global table for every
+    category, which can be a poor fit for e.g. a lignite-heavy fleet --
+    this doesn't fix the gap (that needs real per-zone sourcing) but makes
+    it visible so it isn't discovered by accident (see
+    ``oko.pipeline.run_pipeline``'s startup log).
+    """
+    overrides = ZONE_FACTOR_OVERRIDES if kind == "direct" else ZONE_LIFECYCLE_FACTOR_OVERRIDES
+    return [zone for zone in zones if zone not in overrides]

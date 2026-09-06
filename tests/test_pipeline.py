@@ -85,7 +85,12 @@ def _mock_all_entsoe_no_data(settings: Settings) -> None:
 
 
 def _split_grib_messages(data: bytes) -> dict[str, bytes]:
-    """Split a multi-message GRIB2 blob into ``{shortName: message_bytes}``."""
+    """Split a multi-message GRIB2 blob into ``{shortName: message_bytes}``.
+
+    The fixture has no temperature field, so a ``"2t"`` message is
+    synthesized by cloning ``"10u"`` and overriding its parameter/level
+    metadata -- same technique as ``tests/test_fetchers.py``.
+    """
     offset = 0
     out: dict[str, bytes] = {}
     while offset < len(data):
@@ -93,6 +98,17 @@ def _split_grib_messages(data: bytes) -> dict[str, bytes]:
         try:
             length = eccodes.codes_get(gid, "totalLength")
             name = eccodes.codes_get(gid, "shortName")
+            if name == "10u":
+                clone = eccodes.codes_clone(gid)
+                try:
+                    eccodes.codes_set(clone, "discipline", 0)
+                    eccodes.codes_set(clone, "parameterCategory", 0)
+                    eccodes.codes_set(clone, "parameterNumber", 0)
+                    eccodes.codes_set(clone, "typeOfFirstFixedSurface", 103)
+                    eccodes.codes_set(clone, "scaledValueOfFirstFixedSurface", 2)
+                    out["2t"] = eccodes.codes_get_message(clone)
+                finally:
+                    eccodes.codes_release(clone)
         finally:
             eccodes.codes_release(gid)
         out[name] = data[offset : offset + length]
@@ -102,12 +118,13 @@ def _split_grib_messages(data: bytes) -> dict[str, bytes]:
 
 def _build_synthetic_gfs_object() -> tuple[bytes, str]:
     """One concatenated GFS object blob + matching ``.idx`` text, built from
-    the real small fixture's 3 messages (10u/10v/sdswrf)."""
+    the real small fixture's messages (10u/10v/sdswrf/synthesized 2t)."""
     msgs = _split_grib_messages((FIXTURES / "gfs_sample.grib2").read_bytes())
     order = [
         ("10u", "UGRD", "10 m above ground"),
         ("10v", "VGRD", "10 m above ground"),
         ("sdswrf", "DSWRF", "surface"),
+        ("2t", "TMP", "2 m above ground"),
     ]
     blob = b""
     idx_lines = []
@@ -335,10 +352,16 @@ def test_run_pipeline_computes_flow_traced_intensity_for_fresh_data(
     ) -> list[entsoe.PriceRecord]:
         raise entsoe.EntsoeNoDataError(f"no price data for {zone}")
 
+    async def fake_fetch_installed_capacity(
+        zone: str, year: int, *, client: object, settings: object
+    ) -> dict[str, float]:
+        raise entsoe.EntsoeNoDataError(f"no capacity data for {zone}")
+
     monkeypatch.setattr(entsoe, "fetch_production", fake_fetch_production)
     monkeypatch.setattr(entsoe, "fetch_load", fake_fetch_load)
     monkeypatch.setattr(entsoe, "fetch_exchange", fake_fetch_exchange)
     monkeypatch.setattr(entsoe, "fetch_day_ahead_prices", fake_fetch_day_ahead_prices)
+    monkeypatch.setattr(entsoe, "fetch_installed_capacity", fake_fetch_installed_capacity)
     _mock_noaa_success(settings.noaa_gfs_base_url)
 
     result = _run(run_pipeline(settings=settings))

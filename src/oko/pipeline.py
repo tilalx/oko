@@ -26,7 +26,7 @@ from oko.emissions.calculator import (
     emissions_weighted_breakdown_percentages,
     power_breakdown_percentages,
 )
-from oko.emissions.factors import factors_for_zone
+from oko.emissions.factors import factors_for_zone, zones_missing_override
 from oko.export import (
     CurrentBreakdown,
     build_exchanges_payload,
@@ -43,10 +43,13 @@ from oko.forecast.features import (
 from oko.forecast.model import BreakdownModel, CarbonIntensityModel, Prediction, PriceModel
 from oko.history import (
     HistoryRow,
+    installed_capacity_fetched_at,
     load_breakdown_training_rows,
+    load_installed_capacity,
     load_price_training_rows,
     load_recent_prices,
     load_training_rows,
+    upsert_installed_capacity,
     upsert_rows,
 )
 
@@ -54,6 +57,11 @@ logger = structlog.get_logger(__name__)
 
 HISTORY_FETCH_WINDOW_HOURS = 49
 MIN_TRAINING_ROWS = 24 * 14
+
+#: Installed capacity is only published yearly by ENTSO-E, so re-fetching
+#: it every hourly pipeline run would be pure waste -- refresh at most
+#: this often per zone (see ``_ensure_capacity_fresh``).
+CAPACITY_REFRESH_INTERVAL = dt.timedelta(days=30)
 
 
 class PipelineError(RuntimeError):
@@ -175,6 +183,49 @@ async def _fetch_price_for_zones(
 
     results = await asyncio.gather(*(_fetch_one(zone) for zone in zones))
     return dict(result for result in results if result is not None)
+
+
+async def _ensure_capacity_fresh(
+    zones: tuple[str, ...],
+    *,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    now: dt.datetime,
+    max_concurrency: int = ENTSOE_MAX_CONCURRENCY,
+) -> None:
+    """Refresh cached installed-capacity data for zones whose cache is stale/missing.
+
+    Best-effort: a per-zone fetch failure (or ENTSO-E simply not having
+    published this year's capacity doc yet) is logged and skipped rather
+    than aborting the pipeline run -- the forecast falls back to the
+    fixed wind/solar weighting when no cached capacity is available (see
+    ``oko.forecast.features.residual_load_share_from_weather``).
+    """
+    stale_zones = [
+        zone
+        for zone in zones
+        if (fetched_at := installed_capacity_fetched_at(settings.sqlite_path, zone)) is None
+        or now - fetched_at >= CAPACITY_REFRESH_INTERVAL
+    ]
+    if not stale_zones:
+        return
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def _refresh_one(zone: str) -> None:
+        async with semaphore:
+            try:
+                capacity = await entsoe.fetch_installed_capacity(
+                    zone, now.year, client=client, settings=settings
+                )
+            except entsoe.EntsoeError as exc:
+                logger.warning("pipeline.capacity_fetch_failed", zone=zone, error=str(exc))
+                return
+        upsert_installed_capacity(
+            settings.sqlite_path, zone, now.year, list(capacity.items()), fetched_at=now
+        )
+
+    await asyncio.gather(*(_refresh_one(zone) for zone in stale_zones))
 
 
 def _current_breakdown(
@@ -308,7 +359,13 @@ async def _run_zone(
         price_model = PriceModel.train(price_rows, price_targets)
         price_model.save(model_dir / "price.txt")
 
-    forecast_rows = build_forecast_features(weather, reference_time=now)
+    capacity = load_installed_capacity(settings.sqlite_path, zone)
+    forecast_rows = build_forecast_features(
+        weather,
+        reference_time=now,
+        wind_capacity_mw=capacity.get("wind"),
+        solar_capacity_mw=capacity.get("solar"),
+    )
     direct_predictions = direct_model.predict(forecast_rows)
     lifecycle_by_timestamp = (
         {p.timestamp: p.value_g_per_kwh for p in lifecycle_model.predict(forecast_rows)}
@@ -416,9 +473,20 @@ async def run_pipeline(*, settings: Settings | None = None) -> PipelineResult:
     now = dt.datetime.now(dt.UTC).replace(minute=0, second=0, microsecond=0)
     fetch_start = now - dt.timedelta(hours=HISTORY_FETCH_WINDOW_HOURS)
 
+    missing_factor_overrides = zones_missing_override(FLOW_TRACING_ZONES)
+    if missing_factor_overrides:
+        logger.info(
+            "pipeline.zone_factor_coverage",
+            zones_missing_override=missing_factor_overrides,
+            note="these zones use generic global emission factors, not zone-specific ones",
+        )
+
     async with httpx.AsyncClient() as client:
         window = await fetch_and_trace_window(
             fetch_start, now, client=client, settings=resolved_settings
+        )
+        await _ensure_capacity_fresh(
+            FLOW_TRACING_ZONES, client=client, settings=resolved_settings, now=now
         )
 
         succeeded_zones = sorted(window.production)

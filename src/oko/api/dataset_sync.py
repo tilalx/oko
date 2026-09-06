@@ -7,6 +7,7 @@ this gets scheduled on container startup.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 import tempfile
@@ -92,3 +93,12 @@ async def sync_dataset(settings: Settings, client: httpx.AsyncClient) -> None:
             logger.info("dataset_sync.updated", file=name, bytes=len(content))
             if target == settings.sqlite_path:
                 reset_query_connection()
+
+
+async def _main() -> None:
+    async with httpx.AsyncClient() as client:
+        await sync_dataset(Settings(), client)
+
+
+if __name__ == "__main__":
+    asyncio.run(_main())

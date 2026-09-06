@@ -40,6 +40,17 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("price_eur_per_mwh", "REAL"),
 )
 
+_CAPACITY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS installed_capacity (
+    zone TEXT NOT NULL,
+    category TEXT NOT NULL,
+    capacity_mw REAL NOT NULL,
+    year INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (zone, category)
+);
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class HistoryRow:
@@ -59,9 +70,72 @@ def init_db(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
         conn.execute(_SCHEMA)
+        conn.execute(_CAPACITY_SCHEMA)
         for column, sql_type in _MIGRATION_COLUMNS:
             with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute(f"ALTER TABLE intensity_history ADD COLUMN {column} {sql_type}")
+
+
+def upsert_installed_capacity(
+    path: Path,
+    zone: str,
+    year: int,
+    capacity_by_category: Sequence[tuple[str, float]],
+    *,
+    fetched_at: dt.datetime,
+) -> None:
+    """Cache one zone's installed capacity per category.
+
+    See ``oko.fetchers.entsoe.fetch_installed_capacity``. Overwrites any
+    previously cached row for ``(zone, category)`` --
+    installed capacity is a yearly-refreshed snapshot, not a time series,
+    so there's no history to preserve here (unlike ``upsert_rows``).
+    """
+    if not capacity_by_category:
+        return
+    init_db(path)
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO installed_capacity (zone, category, capacity_mw, year, fetched_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(zone, category) DO UPDATE SET
+                capacity_mw=excluded.capacity_mw,
+                year=excluded.year,
+                fetched_at=excluded.fetched_at
+            """,
+            [
+                (zone, category, capacity_mw, year, fetched_at.isoformat())
+                for category, capacity_mw in capacity_by_category
+            ],
+        )
+    logger.info(
+        "history.installed_capacity_upserted", zone=zone, categories=len(capacity_by_category)
+    )
+
+
+def load_installed_capacity(path: Path, zone: str) -> dict[str, float]:
+    """Load a zone's cached installed capacity per category, MW. Empty if never fetched."""
+    if not path.exists():
+        return {}
+    with sqlite3.connect(path) as conn:
+        rows = conn.execute(
+            "SELECT category, capacity_mw FROM installed_capacity WHERE zone = ?", (zone,)
+        ).fetchall()
+    return dict(rows)
+
+
+def installed_capacity_fetched_at(path: Path, zone: str) -> dt.datetime | None:
+    """Return when ``zone``'s installed capacity was last fetched, or ``None`` if never."""
+    if not path.exists():
+        return None
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT fetched_at FROM installed_capacity WHERE zone = ? "
+            "ORDER BY fetched_at DESC LIMIT 1",
+            (zone,),
+        ).fetchone()
+    return dt.datetime.fromisoformat(row[0]) if row else None
 
 
 def upsert_rows(path: Path, rows: Sequence[HistoryRow]) -> None:

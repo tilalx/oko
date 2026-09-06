@@ -51,9 +51,32 @@ PRICE_LAG_HOURS = 168
 #: deliberately simple normalisation constant for the MVP proxy.
 WIND_SATURATION_MS = 12.0
 
+#: Wind speed (m/s) above which real turbines feather/shut down for
+#: structural safety — the proxy must NOT keep implying near-max output
+#: during a storm just because it's above ``WIND_SATURATION_MS``.
+WIND_CUTOUT_MS = 25.0
+
 #: DSWRF (W/m²) at which the solar proxy signal saturates — roughly clear
 #: -sky midday irradiance in central Europe.
 DSWRF_SATURATION_WM2 = 800.0
+
+#: NOAA GFS reports wind at 10 m; modern turbine hubs sit much higher.
+#: Extrapolated via the logarithmic wind profile (see
+#: ``_wind_speed_at_hub_height``) before feeding the power-curve proxy —
+#: near-surface wind systematically understates hub-height wind due to
+#: surface friction (wind shear).
+WIND_MEASUREMENT_HEIGHT_M = 10.0
+TURBINE_HUB_HEIGHT_M = 100.0
+
+#: Surface roughness length (m) for the log-law extrapolation — a
+#: generic "open/agricultural terrain with scattered obstacles" value
+#: (Davenport/Wieringa classification), not calibrated per zone.
+SURFACE_ROUGHNESS_LENGTH_M = 0.1
+
+#: Fallback wind/solar weighting used when installed capacity isn't
+#: available (e.g. a zone with no cached ENTSO-E capacity data yet) —
+#: the same fixed 65/35 split this module previously always used.
+DEFAULT_WIND_WEIGHT = 0.65
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,34 +187,77 @@ def residual_load_share_from_production(
     return min(max(share, 0.0), 1.0)
 
 
-def residual_load_share_from_weather(wind_speed_10m_ms: float, dswrf_wm2: float) -> float:
+def _wind_speed_at_hub_height(wind_speed_10m_ms: float) -> float:
+    """Extrapolate 10 m wind speed to turbine hub height via the log wind profile.
+
+    ``v(h) = v(10m) * ln(h / z0) / ln(10m / z0)`` — standard boundary-layer
+    approximation; not a substitute for real hub-height reanalysis, but a
+    documented correction rather than silently using near-surface wind
+    (which systematically understates turbine-height wind due to surface
+    friction/shear).
+    """
+    if wind_speed_10m_ms <= 0.0:
+        return 0.0
+    ratio = math.log(TURBINE_HUB_HEIGHT_M / SURFACE_ROUGHNESS_LENGTH_M) / math.log(
+        WIND_MEASUREMENT_HEIGHT_M / SURFACE_ROUGHNESS_LENGTH_M
+    )
+    return wind_speed_10m_ms * ratio
+
+
+def residual_load_share_from_weather(
+    wind_speed_10m_ms: float,
+    dswrf_wm2: float,
+    *,
+    wind_capacity_mw: float | None = None,
+    solar_capacity_mw: float | None = None,
+) -> float:
     """Approximate the same normalised quantity from a NOAA GFS forecast point.
 
     Deliberately simple, monotonic proxies — not a power-curve or
     capacity-factor model (that would need per-turbine/per-panel data
     OKO doesn't have in the MVP):
 
-    - wind proxy: wind speed cubed (power in freestream air scales with
-      ``v^3``, which is the standard qualitative shape of a turbine power
-      curve below rated speed) then clipped once it exceeds
-      ``WIND_SATURATION_MS``, normalised to ``[0, 1]``.
+    - wind proxy: 10 m wind extrapolated to hub height (see
+      ``_wind_speed_at_hub_height``), cubed (power in freestream air
+      scales with ``v^3``, the standard qualitative shape of a turbine
+      power curve below rated speed), clipped once it exceeds
+      ``WIND_SATURATION_MS``, normalised to ``[0, 1]``, and forced to 0
+      above ``WIND_CUTOUT_MS`` (real turbines feather/shut down in a
+      storm rather than keep producing at the saturated maximum).
     - solar proxy: DSWRF linearly clipped at ``DSWRF_SATURATION_WM2``,
       normalised to ``[0, 1]``.
 
+    The two proxies are blended by installed-capacity share when
+    ``wind_capacity_mw``/``solar_capacity_mw`` are given (see
+    ``oko.emissions.capacity``), instead of a value fixed for all time —
+    as a zone's wind/solar buildout mix shifts (e.g. Germany's solar
+    capacity growing faster than wind), the same wind speed should
+    contribute proportionally less to the blended proxy. Falls back to
+    ``DEFAULT_WIND_WEIGHT`` when capacity isn't available (e.g. not yet
+    fetched for this zone).
+
     Args:
-        wind_speed_10m_ms: DE-averaged 10 m wind speed, m/s.
-        dswrf_wm2: DE-averaged downward shortwave radiation flux, W/m².
+        wind_speed_10m_ms: zone-averaged 10 m wind speed, m/s.
+        dswrf_wm2: zone-averaged downward shortwave radiation flux, W/m².
+        wind_capacity_mw: zone's installed wind capacity, MW, if known.
+        solar_capacity_mw: zone's installed solar capacity, MW, if known.
 
     Returns:
         The proxy ``residual_load_share``, in ``[0, 1]``.
     """
-    wind_proxy = min(wind_speed_10m_ms, WIND_SATURATION_MS) ** 3 / WIND_SATURATION_MS**3
+    hub_height_wind_ms = _wind_speed_at_hub_height(wind_speed_10m_ms)
+    wind_proxy = min(hub_height_wind_ms, WIND_SATURATION_MS) ** 3 / WIND_SATURATION_MS**3
+    if hub_height_wind_ms > WIND_CUTOUT_MS:
+        wind_proxy = 0.0
     solar_proxy = min(max(dswrf_wm2, 0.0), DSWRF_SATURATION_WM2) / DSWRF_SATURATION_WM2
-    # Weighted 65/35 toward wind: wind is the larger and steadier share of
-    # DE's variable renewable generation. A fixed, documented weighting —
-    # not fit from data — consistent with the MVP's "no full capacity
-    # model" boundary.
-    renewable_proxy = 0.65 * wind_proxy + 0.35 * solar_proxy
+
+    wind_weight = DEFAULT_WIND_WEIGHT
+    if wind_capacity_mw is not None and solar_capacity_mw is not None:
+        wind_capacity_mw = max(wind_capacity_mw, 0.0)
+        total_capacity_mw = wind_capacity_mw + max(solar_capacity_mw, 0.0)
+        if total_capacity_mw > 0:
+            wind_weight = wind_capacity_mw / total_capacity_mw
+    renewable_proxy = wind_weight * wind_proxy + (1.0 - wind_weight) * solar_proxy
     return min(max(1.0 - renewable_proxy, 0.0), 1.0)
 
 
@@ -256,15 +322,24 @@ def build_training_features(
 
 
 def build_forecast_features(
-    weather_points: Sequence[WeatherPoint], reference_time: dt.datetime
+    weather_points: Sequence[WeatherPoint],
+    reference_time: dt.datetime,
+    *,
+    wind_capacity_mw: float | None = None,
+    solar_capacity_mw: float | None = None,
 ) -> list[FeatureRow]:
     """Build inference-time feature rows from a NOAA GFS forecast.
 
     Args:
-        weather_points: hourly DE-averaged weather forecast, e.g. from
+        weather_points: hourly zone-averaged weather forecast, e.g. from
             ``oko.fetchers.noaa_gfs.fetch_forecast``.
         reference_time: the forecast's issue time (used to compute each
             point's ``horizon_hours``); typically the GFS cycle time.
+        wind_capacity_mw: zone's installed wind capacity, MW, if known
+            (see ``oko.emissions.capacity``) — passed through to
+            ``residual_load_share_from_weather`` for every row (capacity
+            doesn't change within one forecast horizon).
+        solar_capacity_mw: zone's installed solar capacity, MW, if known.
 
     Returns:
         One ``FeatureRow`` per weather point, sorted by timestamp.
@@ -285,7 +360,10 @@ def build_forecast_features(
                 month_sin=month_sin,
                 month_cos=month_cos,
                 residual_load_share=residual_load_share_from_weather(
-                    point.wind_speed_10m_ms, point.dswrf_wm2
+                    point.wind_speed_10m_ms,
+                    point.dswrf_wm2,
+                    wind_capacity_mw=wind_capacity_mw,
+                    solar_capacity_mw=solar_capacity_mw,
                 ),
                 horizon_hours=horizon,
             )

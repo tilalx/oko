@@ -10,11 +10,14 @@ from oko.forecast.features import FeatureRow
 from oko.history import (
     HistoryRow,
     init_db,
+    installed_capacity_fetched_at,
     load_breakdown_training_rows,
+    load_installed_capacity,
     load_price_training_rows,
     load_recent_prices,
     load_training_rows,
     query_recent,
+    upsert_installed_capacity,
     upsert_rows,
 )
 
@@ -320,3 +323,55 @@ def test_load_price_training_rows_migrates_a_legacy_db_instead_of_raising(
 
     assert features == []
     assert prices == []
+
+
+# --------------------------------------------------------------------------
+# installed_capacity
+# --------------------------------------------------------------------------
+
+
+def test_load_installed_capacity_on_nonexistent_db_returns_empty(tmp_path: Path) -> None:
+    assert load_installed_capacity(tmp_path / "missing.sqlite3", "DE-LU") == {}
+
+
+def test_installed_capacity_fetched_at_on_nonexistent_db_returns_none(tmp_path: Path) -> None:
+    assert installed_capacity_fetched_at(tmp_path / "missing.sqlite3", "DE-LU") is None
+
+
+def test_upsert_and_load_installed_capacity_round_trip(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    fetched_at = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+
+    upsert_installed_capacity(
+        db_path, "DE-LU", 2026, [("wind", 58000.0), ("solar", 81000.0)], fetched_at=fetched_at
+    )
+
+    assert load_installed_capacity(db_path, "DE-LU") == {"wind": 58000.0, "solar": 81000.0}
+    assert installed_capacity_fetched_at(db_path, "DE-LU") == fetched_at
+
+
+def test_upsert_installed_capacity_overwrites_previous_value(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    fetched_2026 = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    fetched_2027 = dt.datetime(2027, 1, 1, tzinfo=dt.UTC)
+    upsert_installed_capacity(db_path, "DE-LU", 2026, [("wind", 58000.0)], fetched_at=fetched_2026)
+    upsert_installed_capacity(db_path, "DE-LU", 2027, [("wind", 60000.0)], fetched_at=fetched_2027)
+
+    assert load_installed_capacity(db_path, "DE-LU") == {"wind": 60000.0}
+
+
+def test_installed_capacity_is_scoped_per_zone(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    fetched_at = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    upsert_installed_capacity(db_path, "DE-LU", 2026, [("wind", 58000.0)], fetched_at=fetched_at)
+    upsert_installed_capacity(db_path, "FR", 2026, [("wind", 20000.0)], fetched_at=fetched_at)
+
+    assert load_installed_capacity(db_path, "DE-LU") == {"wind": 58000.0}
+    assert load_installed_capacity(db_path, "FR") == {"wind": 20000.0}
+
+
+def test_upsert_installed_capacity_empty_list_is_a_noop(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    fetched_at = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    upsert_installed_capacity(db_path, "DE-LU", 2026, [], fetched_at=fetched_at)
+    assert not db_path.exists()

@@ -201,6 +201,36 @@ def test_fetch_day_ahead_prices_rejects_unknown_zone() -> None:
 
 
 @respx.mock
+def test_fetch_installed_capacity_sums_categories_and_excludes_storage() -> None:
+    settings = _settings()
+    fixture_xml = (FIXTURES / "entsoe_capacity_de.xml").read_text()
+    respx.get(settings.entsoe_base_url, params={"documentType": "A68"}).mock(
+        return_value=httpx.Response(200, text=fixture_xml)
+    )
+
+    async def go() -> dict[str, float]:
+        async with httpx.AsyncClient() as client:
+            return await entsoe.fetch_installed_capacity(
+                "DE-LU", 2026, client=client, settings=settings
+            )
+
+    capacity = _run(go())
+
+    assert capacity == {"wind": 58000.0, "solar": 81000.0}  # B10 (storage) excluded
+
+
+def test_fetch_installed_capacity_rejects_unknown_zone() -> None:
+    settings = _settings()
+
+    async def go() -> None:
+        async with httpx.AsyncClient() as client:
+            await entsoe.fetch_installed_capacity("XX", 2026, client=client, settings=settings)
+
+    with pytest.raises(entsoe.EntsoeError, match="Unknown zone"):
+        _run(go())
+
+
+@respx.mock
 def test_fetch_day_ahead_prices_no_data_raises_typed_error() -> None:
     settings = _settings()
     fixture_xml = (FIXTURES / "entsoe_no_data.xml").read_text()
@@ -373,11 +403,13 @@ def test_resolution_to_timedelta_rejects_unknown_format() -> None:
 # NOAA GFS
 # --------------------------------------------------------------------------
 
-#: NOAA's real GFS idx sibling files describe the surface/10m fields OKO
-#: needs with these exact (varname, level) pairs -- see noaa_gfs._byte_range.
+#: NOAA's real GFS idx sibling files describe the surface/10m/2m fields
+#: OKO needs with these exact (varname, level) pairs -- see
+#: noaa_gfs._byte_range.
 _UGRD = ("UGRD", "10 m above ground")
 _VGRD = ("VGRD", "10 m above ground")
 _DSWRF = ("DSWRF", "surface")
+_TMP = ("TMP", "2 m above ground")
 
 
 def _split_grib_messages(data: bytes) -> dict[str, bytes]:
@@ -385,7 +417,11 @@ def _split_grib_messages(data: bytes) -> dict[str, bytes]:
 
     Each GRIB2 message reports its own exact byte length (``totalLength``),
     so a real multi-field fixture can be split into standalone messages
-    without needing separate single-field binary fixtures.
+    without needing separate single-field binary fixtures. The fixture
+    has no temperature field, so a ``"2t"`` message is synthesized here by
+    cloning ``"10u"`` and overriding its parameter/level metadata --
+    that's real, decodable GRIB2 (same underlying wind-speed values, which
+    is fine: these tests exercise field routing, not weather realism).
     """
     import eccodes as _eccodes
 
@@ -396,6 +432,17 @@ def _split_grib_messages(data: bytes) -> dict[str, bytes]:
         try:
             length = _eccodes.codes_get(gid, "totalLength")
             name = _eccodes.codes_get(gid, "shortName")
+            if name == "10u":
+                clone = _eccodes.codes_clone(gid)
+                try:
+                    _eccodes.codes_set(clone, "discipline", 0)
+                    _eccodes.codes_set(clone, "parameterCategory", 0)
+                    _eccodes.codes_set(clone, "parameterNumber", 0)
+                    _eccodes.codes_set(clone, "typeOfFirstFixedSurface", 103)
+                    _eccodes.codes_set(clone, "scaledValueOfFirstFixedSurface", 2)
+                    out["2t"] = _eccodes.codes_get_message(clone)
+                finally:
+                    _eccodes.codes_release(clone)
         finally:
             _eccodes.codes_release(gid)
         out[name] = data[offset : offset + length]
@@ -405,7 +452,7 @@ def _split_grib_messages(data: bytes) -> dict[str, bytes]:
 
 def _build_synthetic_object(msgs: dict[str, bytes]) -> tuple[bytes, str]:
     """Concatenate messages into one blob + a matching ``.idx`` text."""
-    order = [("10u", *_UGRD), ("10v", *_VGRD), ("sdswrf", *_DSWRF)]
+    order = [("10u", *_UGRD), ("10v", *_VGRD), ("sdswrf", *_DSWRF), ("2t", *_TMP)]
     blob = b""
     idx_lines = []
     for i, (short_name, varname, level) in enumerate(order, start=1):
@@ -491,7 +538,7 @@ def test_decode_message_raises_on_garbage_input() -> None:
 
 
 def test_bbox_mean_matches_hand_computed_value() -> None:
-    lats = np.array([10.0, 20.0])
+    lats = np.array([0.0, 0.0])  # equal cos(lat) weight -> reduces to a plain mean
     lons = np.array([355.0, 5.0])  # native GFS 0..360 grid longitudes
     grid = np.array([[1.0, 3.0], [2.0, 4.0]])  # grid[j, i]: rows=lats, cols=lons
 
@@ -499,8 +546,22 @@ def test_bbox_mean_matches_hand_computed_value() -> None:
     # leftlon=-10 -> 350.0, rightlon=-2 -> 358.0 after %360 -- a normal
     # (non-wrapping) range in 0..360 that should match only lon index 0
     # (355.0), exercising the negative-longitude conversion explicitly.
-    bbox = {"leftlon": -10.0, "rightlon": -2.0, "bottomlat": 0.0, "toplat": 30.0}
+    bbox = {"leftlon": -10.0, "rightlon": -2.0, "bottomlat": -10.0, "toplat": 10.0}
     assert noaa_gfs._bbox_mean(lats, lons, grid, bbox) == pytest.approx((1.0 + 2.0) / 2)
+
+
+def test_bbox_mean_weights_rows_by_cos_latitude() -> None:
+    # Two equal-value-spread rows at very different latitudes: an
+    # unweighted mean would give them equal say, but the high-latitude
+    # row's cos(lat) weight is much smaller, so the weighted mean should
+    # sit closer to the low-latitude row's value.
+    lats = np.array([0.0, 80.0])
+    lons = np.array([0.0, 1.0])
+    grid = np.array([[0.0, 0.0], [100.0, 100.0]])
+    bbox = {"leftlon": 0.0, "rightlon": 1.0, "bottomlat": -1.0, "toplat": 81.0}
+
+    weighted = noaa_gfs._bbox_mean(lats, lons, grid, bbox)
+    assert weighted < 50.0  # unweighted mean would be exactly 50.0
 
 
 def test_extract_zone_series_slices_shared_hours_locally() -> None:
@@ -513,13 +574,17 @@ def test_extract_zone_series_slices_shared_hours_locally() -> None:
             lons=lons,
             wind_speed_grid=np.array([[1.0, 2.0], [3.0, 4.0]]),
             dswrf_grid=np.array([[10.0, 20.0], [30.0, 40.0]]),
+            temperature_grid_c=np.array([[5.0, 6.0], [7.0, 8.0]]),
         )
     ]
     points = noaa_gfs.extract_zone_series(hours, ZONE_BBOXES["DE-LU"])
     assert len(points) == 1
     assert points[0].valid_time == hours[0].valid_time
-    assert points[0].wind_speed_10m_ms == pytest.approx(np.mean([1.0, 2.0, 3.0, 4.0]))
-    assert points[0].dswrf_wm2 == pytest.approx(np.mean([10.0, 20.0, 30.0, 40.0]))
+    # lat=47/56 -> non-equal cos(lat) row weights, so this is no longer a
+    # plain mean -- just check it lands strictly between the two rows.
+    assert 1.5 < points[0].wind_speed_10m_ms < 3.5
+    assert 15.0 < points[0].dswrf_wm2 < 35.0
+    assert 5.5 < points[0].temperature_2m_c < 7.5
 
 
 @respx.mock

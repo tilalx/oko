@@ -18,6 +18,9 @@ Document types used:
   flows, queried in both directions per border and netted.
 - ``A65``/``A16`` ("System total load", realised) for total load.
 - ``A44`` ("Price Document") for day-ahead auction prices.
+- ``A68``/``A33`` ("Installed generation capacity aggregated", year-ahead)
+  for installed capacity per category, refreshed infrequently (yearly
+  publication cadence) -- see ``fetch_installed_capacity``.
 
 Storage technologies (hydro pumped storage / battery, PSR codes B10/B25)
 are excluded from the production mix entirely rather than tracking their
@@ -63,7 +66,9 @@ PSR_TYPE_TO_CATEGORY: dict[str, str] = {
     "B14": "nuclear",
     "B15": "unknown",  # Other renewable
     "B16": "solar",
-    "B17": "biomass",  # Waste
+    "B17": "waste",  # Municipal/industrial waste incineration -- not biogenic-neutral
+    # like B01 biomass, so kept as its own category with its own (non-zero)
+    # emission factor rather than folded into "biomass" (see emissions/factors.py).
     "B18": "wind",  # Wind Offshore
     "B19": "wind",  # Wind Onshore
     "B20": "unknown",  # Other
@@ -572,3 +577,75 @@ async def fetch_day_ahead_prices(
     ]
     logger.info("entsoe.prices_fetched", zone=zone, hours=len(records))
     return records
+
+
+async def fetch_installed_capacity(
+    zone: str,
+    year: int,
+    *,
+    client: httpx.AsyncClient,
+    settings: Settings,
+) -> dict[str, float]:
+    """Fetch installed generation capacity per category for a zone/year.
+
+    ENTSO-E's ``A68`` ("Installed generation capacity aggregated")
+    document is published yearly (``processType`` ``A33``, "year ahead"),
+    one ``TimeSeries`` per PSR type with a single annual value rather than
+    an hourly curve -- unlike ``fetch_production``/``fetch_load``, this
+    doesn't need ``_parse_period_points``' resolution handling; each
+    ``Period`` has exactly one ``Point``.
+
+    Args:
+        zone: OKO zone key, must be a key of ``ENTSOE_DOMAIN_MAPPINGS``.
+        year: the capacity year to query (ENTSO-E requires the period to
+            span exactly one calendar year, UTC).
+        client: shared HTTP client.
+        settings: application settings (token, base URL, timeout).
+
+    Returns:
+        Category -> installed capacity, MW. A category absent from the
+        response has no installed capacity reported for that year.
+
+    Raises:
+        EntsoeNoDataError: if the zone has no capacity data for this year.
+        EntsoeError: if the zone is unknown, the request fails, or the
+            response can't be parsed.
+    """
+    if zone not in ENTSOE_DOMAIN_MAPPINGS:
+        raise EntsoeError(f"Unknown zone for ENTSO-E capacity query: {zone!r}")
+
+    start = dt.datetime(year, 1, 1, tzinfo=dt.UTC)
+    end = dt.datetime(year + 1, 1, 1, tzinfo=dt.UTC)
+    params = {
+        "documentType": "A68",
+        "processType": "A33",
+        "in_Domain": ENTSOE_DOMAIN_MAPPINGS[zone],
+        **_period_span(start, end),
+    }
+    parsed = await _request_entsoe(client, settings, params)
+    document = parsed.get("GL_MarketDocument", {})
+
+    capacity_by_category: dict[str, float] = {}
+    for timeseries in _as_list(document.get("TimeSeries")):
+        psr_type = timeseries.get("MktPSRType", {}).get("psrType")
+        if psr_type is None or psr_type in STORAGE_PSR_TYPES:
+            continue
+        category = PSR_TYPE_TO_CATEGORY.get(psr_type, "unknown")
+        for period in _as_list(timeseries.get("Period")):
+            points = _as_list(period.get("Point"))
+            if not points:
+                continue
+            # One annual value per TimeSeries -- take it directly rather
+            # than expanding via _parse_period_points (built for hourly
+            # curves with A01/A03 curveType and PT*M/P*D resolutions,
+            # neither of which applies to a single yearly point).
+            value = float(points[0]["quantity"])
+            capacity_by_category[category] = capacity_by_category.get(category, 0.0) + value
+
+    logger.info(
+        "entsoe.installed_capacity_fetched",
+        zone=zone,
+        year=year,
+        categories=len(capacity_by_category),
+    )
+    return capacity_by_category

@@ -59,14 +59,39 @@ def test_residual_load_share_from_weather_extremes() -> None:
     assert windy_sunny == pytest.approx(0.0)
 
 
-def test_residual_load_share_from_weather_saturates_beyond_max() -> None:
+def test_residual_load_share_from_weather_saturates_below_cutout() -> None:
     at_saturation = features.residual_load_share_from_weather(
         features.WIND_SATURATION_MS, features.DSWRF_SATURATION_WM2
     )
-    way_beyond = features.residual_load_share_from_weather(
-        features.WIND_SATURATION_MS * 3, features.DSWRF_SATURATION_WM2 * 3
+    # Still below WIND_CUTOUT_MS once extrapolated to hub height -> same
+    # saturated (max-output) proxy as exactly at WIND_SATURATION_MS.
+    a_bit_more = features.residual_load_share_from_weather(
+        features.WIND_SATURATION_MS * 1.2, features.DSWRF_SATURATION_WM2 * 3
     )
-    assert way_beyond == pytest.approx(at_saturation)
+    assert a_bit_more == pytest.approx(at_saturation)
+
+
+def test_residual_load_share_from_weather_cuts_out_in_storm() -> None:
+    # A wind speed whose hub-height extrapolation exceeds WIND_CUTOUT_MS
+    # must NOT keep implying near-max wind output -- real turbines
+    # feather/shut down, so the wind proxy should drop to 0.
+    calm = features.residual_load_share_from_weather(0.0, 0.0)
+    storm = features.residual_load_share_from_weather(features.WIND_SATURATION_MS * 3, 0.0)
+    assert storm == pytest.approx(calm)
+
+
+def test_residual_load_share_from_weather_uses_capacity_weighting_when_available() -> None:
+    # Same weather, but installed capacity is almost all solar -> the
+    # blended proxy should lean toward the solar signal instead of the
+    # fixed 65/35 default.
+    wind_only_weather = (features.WIND_SATURATION_MS, 0.0)  # max wind, no sun
+    default_weighting = features.residual_load_share_from_weather(*wind_only_weather)
+    solar_heavy_capacity = features.residual_load_share_from_weather(
+        *wind_only_weather, wind_capacity_mw=10.0, solar_capacity_mw=990.0
+    )
+    # Default weighting gives wind (which is maxed) 65% weight -> lower
+    # residual share than when wind capacity is negligible.
+    assert solar_heavy_capacity > default_weighting
 
 
 def test_feature_columns_matches_as_dict_keys() -> None:
@@ -106,10 +131,16 @@ def test_build_forecast_features_computes_horizon_and_sorts() -> None:
     reference = HOUR
     points = [
         WeatherPoint(
-            valid_time=HOUR + dt.timedelta(hours=2), wind_speed_10m_ms=5.0, dswrf_wm2=100.0
+            valid_time=HOUR + dt.timedelta(hours=2),
+            wind_speed_10m_ms=5.0,
+            dswrf_wm2=100.0,
+            temperature_2m_c=15.0,
         ),
         WeatherPoint(
-            valid_time=HOUR + dt.timedelta(hours=1), wind_speed_10m_ms=5.0, dswrf_wm2=100.0
+            valid_time=HOUR + dt.timedelta(hours=1),
+            wind_speed_10m_ms=5.0,
+            dswrf_wm2=100.0,
+            temperature_2m_c=15.0,
         ),
     ]
     rows = features.build_forecast_features(points, reference)
@@ -174,6 +205,14 @@ def test_confidence_for_horizon(horizon: int, expected: str) -> None:
     assert model.confidence_for_horizon(horizon) == expected
 
 
+def test_confidence_for_horizon_accepts_custom_thresholds() -> None:
+    # A caller with measured per-horizon error (e.g. from a backtest) can
+    # override the default fixed 24h/72h buckets.
+    assert model.confidence_for_horizon(10, high_max_hours=6, medium_max_hours=20) == "medium"
+    assert model.confidence_for_horizon(6, high_max_hours=6, medium_max_hours=20) == "high"
+    assert model.confidence_for_horizon(21, high_max_hours=6, medium_max_hours=20) == "low"
+
+
 def _synthetic_rows(n: int) -> tuple[list[features.FeatureRow], list[float]]:
     rows = []
     targets = []
@@ -211,6 +250,22 @@ def test_predict_empty_input_returns_empty() -> None:
     rows, targets = _synthetic_rows(50)
     trained = model.CarbonIntensityModel.train(rows, targets)
     assert trained.predict([]) == []
+
+
+def test_train_uses_early_stopping_and_does_not_use_every_boost_round() -> None:
+    # Enough rows to trigger the chronological-split path (see
+    # MIN_ROWS_FOR_EARLY_STOPPING); a clean, easily-learnable relationship
+    # should converge and stop well before MAX_NUM_BOOST_ROUND.
+    rows, targets = _synthetic_rows(500)
+    trained = model.CarbonIntensityModel.train(rows, targets)
+    assert trained._booster.best_iteration < model.MAX_NUM_BOOST_ROUND
+
+
+def test_train_falls_back_to_fixed_rounds_below_early_stopping_threshold() -> None:
+    rows, targets = _synthetic_rows(model.MIN_ROWS_FOR_EARLY_STOPPING - 1)
+    # Must not raise despite too few rows for a validation split.
+    trained = model.CarbonIntensityModel.train(rows, targets)
+    assert trained.predict(rows[:1])[0].value_g_per_kwh >= 0.0
 
 
 def test_train_predict_learns_the_relationship() -> None:

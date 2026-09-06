@@ -65,6 +65,23 @@ def test_lifecycle_factors_fall_back_to_global_for_unknown_zone() -> None:
     )
 
 
+def test_waste_is_a_distinct_category_from_biomass_with_a_nonzero_direct_factor() -> None:
+    de_factors = factors.factors_for_zone("DE-LU")
+    assert de_factors["waste"] > 0.0
+    assert de_factors["biomass"] == 0.0
+    assert "waste" in factors.CATEGORIES
+
+
+def test_zones_missing_override_flags_zones_with_no_zone_specific_factors() -> None:
+    missing = factors.zones_missing_override(("DE-LU", "FR", "ZZ"))
+    assert missing == ["ZZ"]  # DE-LU and FR both have explicit overrides
+
+
+def test_zones_missing_override_lifecycle_kind() -> None:
+    missing = factors.zones_missing_override(("DE-LU", "ZZ"), kind="lifecycle")
+    assert missing == ["ZZ"]
+
+
 # --------------------------------------------------------------------------
 # calculator.power_breakdown_percentages
 # --------------------------------------------------------------------------

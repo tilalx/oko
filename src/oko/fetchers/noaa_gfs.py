@@ -1,4 +1,4 @@
-"""NOAA GFS 0.25° fetcher: 10 m wind speed and downward shortwave radiation.
+"""NOAA GFS 0.25° fetcher: 10 m wind speed, downward shortwave radiation, 2 m temperature.
 
 Public-domain US government data, no account required. Fetched from NOAA's
 public S3 mirror via the NODD (NOAA Open Data Dissemination) program
@@ -18,8 +18,8 @@ locally (see ``extract_zone_series``) — one shared fetch serves every zone
 in the network instead of one fetch per zone, and adding more zones later
 costs no extra network traffic.
 
-Each forecast hour needs 4 requests (1 idx + 3 field byte-ranges), so
-producing OKO's 120-hour (5-day) horizon means up to ~480 requests total
+Each forecast hour needs 5 requests (1 idx + 4 field byte-ranges), so
+producing OKO's 120-hour (5-day) horizon means up to ~600 requests total
 per pipeline run, independent of how many zones are modeled. Concurrency
 is bounded and each hour is fetched independently so a handful of
 missing/failed hours don't abort the whole forecast — see
@@ -80,11 +80,15 @@ class WeatherPoint:
             bounding box, m/s.
         dswrf_wm2: mean downward shortwave radiation flux over the same
             bounding box, W/m².
+        temperature_2m_c: mean 2 m air temperature over the same bounding
+            box, °C -- a primary electricity-demand driver (heating/
+            cooling load) that wind/solar alone don't capture.
     """
 
     valid_time: dt.datetime
     wind_speed_10m_ms: float
     dswrf_wm2: float
+    temperature_2m_c: float
 
 
 def latest_available_cycle(now: dt.datetime | None = None) -> dt.datetime:
@@ -219,11 +223,18 @@ def _decode_message(data: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 def _bbox_mean(
     lats: np.ndarray, lons: np.ndarray, grid: np.ndarray, bbox: Mapping[str, float]
 ) -> float:
-    """Spatial mean of ``grid`` restricted to ``bbox`` (signed-degree convention).
+    """Area-weighted spatial mean of ``grid`` restricted to ``bbox`` (signed-degree convention).
 
     ``bbox`` (``oko.config.ZONE_BBOXES[zone]`` shape) uses signed
     longitudes (e.g. France's ``leftlon: -5.0``); GFS's grid uses 0..360,
     so bbox longitudes are converted via ``% 360.0`` before masking.
+
+    A lat/lon grid cell's physical area shrinks toward the poles
+    (proportional to ``cos(latitude)``); a plain ``.mean()`` would treat a
+    cell near a bbox's northern edge as equally representative as one
+    near the equator-ward edge, which measurably skews zones spanning a
+    wide latitude range (e.g. Norway's bboxes). Weighting each row by
+    ``cos(lat)`` corrects for that.
     """
     leftlon = bbox["leftlon"] % 360.0
     rightlon = bbox["rightlon"] % 360.0
@@ -234,18 +245,28 @@ def _bbox_mean(
         # Only reachable for a bbox straddling the 0/360 seam -- none of
         # OKO's current zones do, but handled defensively for a future one.
         lon_mask = (lons >= leftlon) | (lons <= rightlon)
-    return float(grid[np.ix_(lat_mask, lon_mask)].mean())
+    selected = grid[np.ix_(lat_mask, lon_mask)]
+    if selected.size == 0:
+        return float("nan")  # matches the previous plain-.mean() behaviour for an empty selection
+    row_weights = np.cos(np.radians(lats[lat_mask]))
+    weights = np.broadcast_to(row_weights[:, np.newaxis], selected.shape)
+    return float(np.average(selected, weights=weights))
+
+
+#: Kelvin -> Celsius offset for GFS's native TMP field.
+KELVIN_TO_CELSIUS = 273.15
 
 
 @dataclass(frozen=True, slots=True)
 class _GlobalHour:
-    """One forecast hour's full global grid for both fields, fetched once."""
+    """One forecast hour's full global grid for every fetched field, fetched once."""
 
     valid_time: dt.datetime
     lats: np.ndarray
     lons: np.ndarray
     wind_speed_grid: np.ndarray
     dswrf_grid: np.ndarray
+    temperature_grid_c: np.ndarray
 
 
 async def _fetch_hour_grids(
@@ -286,20 +307,23 @@ async def _fetch_hour_grids(
                     raise NoaaGfsError(f"empty response body for {field_var}:{field_level}")
                 return response.content
 
-            u_bytes, v_bytes, dswrf_bytes = await asyncio.gather(
+            u_bytes, v_bytes, dswrf_bytes, tmp_bytes = await asyncio.gather(
                 _fetch_field("UGRD", "10 m above ground"),
                 _fetch_field("VGRD", "10 m above ground"),
                 _fetch_field("DSWRF", "surface"),
+                _fetch_field("TMP", "2 m above ground"),
             )
             lats, lons, u_grid = _decode_message(u_bytes)
             _, _, v_grid = _decode_message(v_bytes)
             _, _, dswrf_grid = _decode_message(dswrf_bytes)
+            _, _, tmp_grid_k = _decode_message(tmp_bytes)
             return _GlobalHour(
                 valid_time=valid_time,
                 lats=lats,
                 lons=lons,
                 wind_speed_grid=np.hypot(u_grid, v_grid),
                 dswrf_grid=dswrf_grid,
+                temperature_grid_c=tmp_grid_k - KELVIN_TO_CELSIUS,
             )
         except (httpx.HTTPError, NoaaGfsError) as exc:
             logger.warning(
@@ -397,6 +421,7 @@ def extract_zone_series(hours: list[_GlobalHour], bbox: Mapping[str, float]) -> 
             valid_time=hour.valid_time,
             wind_speed_10m_ms=_bbox_mean(hour.lats, hour.lons, hour.wind_speed_grid, bbox),
             dswrf_wm2=_bbox_mean(hour.lats, hour.lons, hour.dswrf_grid, bbox),
+            temperature_2m_c=_bbox_mean(hour.lats, hour.lons, hour.temperature_grid_c, bbox),
         )
         for hour in hours
     ]
